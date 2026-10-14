@@ -51,11 +51,27 @@ echo "origin   -> $(git remote get-url origin)"
 echo "upstream -> $(git remote get-url upstream)"
 
 if [ -n "$(git status --porcelain)" ]; then
-  echo "" >&2
-  echo "working tree is dirty; commit or stash first so the merge cannot mix your" >&2
-  echo "edits with the merge result:" >&2
-  git status --short >&2
-  exit 1
+  # A merge left mid-conflict is resumable, not dirty: the user is following
+  # this script's own instruction to resolve and re-run. Refusing here would
+  # strand them — the first version of this script did exactly that.
+  if [ -f .git/MERGE_HEAD ]; then
+    if git diff --name-only --diff-filter=U | grep -q .; then
+      echo "" >&2
+      echo "a merge is in progress with unresolved conflicts:" >&2
+      git diff --name-only --diff-filter=U >&2
+      echo "" >&2
+      echo "resolve them, 'git add' the results, then re-run this script." >&2
+      exit 1
+    fi
+    step "Resuming a resolved merge"
+    git commit --no-edit
+  else
+    echo "" >&2
+    echo "working tree is dirty; commit or stash first so the merge cannot mix your" >&2
+    echo "edits with the merge result:" >&2
+    git status --short >&2
+    exit 1
+  fi
 fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
