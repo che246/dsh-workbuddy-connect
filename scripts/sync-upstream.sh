@@ -50,6 +50,10 @@ done
 echo "origin   -> $(git remote get-url origin)"
 echo "upstream -> $(git remote get-url upstream)"
 
+# Set when this run committed a merge that a previous run left resolved but
+# uncommitted. The rebuild below is the whole point of a resumed run, so it
+# must not be skipped by the "nothing left to merge" early exit.
+RESUMED=0
 if [ -n "$(git status --porcelain)" ]; then
   # A merge left mid-conflict is resumable, not dirty: the user is following
   # this script's own instruction to resolve and re-run. Refusing here would
@@ -65,6 +69,10 @@ if [ -n "$(git status --porcelain)" ]; then
     fi
     step "Resuming a resolved merge"
     git commit --no-edit
+    # The merge brought source changes in, so lib/ is now stale. Control must
+    # reach the rebuild below — the first version of this branch fell through
+    # to the "nothing to merge" exit and shipped a stale bundle.
+    RESUMED=1
   else
     echo "" >&2
     echo "working tree is dirty; commit or stash first so the merge cannot mix your" >&2
@@ -85,7 +93,12 @@ echo "branch: $BRANCH"
 echo "commits this fork is ahead of upstream:  $AHEAD"
 echo "commits upstream has that this fork lacks: $BEHIND"
 
-if [ "$BEHIND" -eq 0 ]; then
+if [ "$RESUMED" -eq 1 ]; then
+  # The merge is already committed, so there is nothing left to merge and the
+  # divergence report has nothing to say. Go straight to the rebuild, which is
+  # the step this run exists to perform.
+  echo "merge resumed and committed; continuing to the rebuild."
+elif [ "$BEHIND" -eq 0 ]; then
   step "Nothing to merge"
   echo "upstream/main is already contained in this branch."
   if [ "$PUSH" -eq 1 ] && [ "$(git rev-list --count "origin/main..HEAD")" -gt 0 ]; then
@@ -93,38 +106,38 @@ if [ "$BEHIND" -eq 0 ]; then
     git push origin "$BRANCH"
   fi
   exit 0
-fi
-
-step "Upstream commits to be merged"
-git log --oneline "HEAD..upstream/main"
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  step "Files both sides touch (likely conflicts)"
-  comm -12 \
-    <(git diff --name-only "$(git merge-base HEAD upstream/main)" HEAD | sort) \
-    <(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main | sort) \
-    || true
-  echo ""
-  echo "dry run: not merging."
-  exit 0
-fi
-
-PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-
-step "Merging upstream/main"
-if git merge --no-edit upstream/main; then
-  echo "merged cleanly."
 else
-  echo "" >&2
-  echo "CONFLICTS. Resolve them, then re-run this script." >&2
-  echo "" >&2
-  echo "Two rules that matter here, learned the hard way on this fork:" >&2
-  echo "  * tsconfig.json / tsconfig.client.json: both sides add spec files to" >&2
-  echo "    the same arrays. Keep BOTH sides' entries." >&2
-  echo "  * lib/: never hand-merge build output. Take either side, then let the" >&2
-  echo "    rebuild below overwrite it." >&2
-  git status --short >&2
-  exit 1
+  step "Upstream commits to be merged"
+  git log --oneline "HEAD..upstream/main"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    step "Files both sides touch (likely conflicts)"
+    comm -12 \
+      <(git diff --name-only "$(git merge-base HEAD upstream/main)" HEAD | sort) \
+      <(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main | sort) \
+      || true
+    echo ""
+    echo "dry run: not merging."
+    exit 0
+  fi
+
+  PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+
+  step "Merging upstream/main"
+  if git merge --no-edit upstream/main; then
+    echo "merged cleanly."
+  else
+    echo "" >&2
+    echo "CONFLICTS. Resolve them, then re-run this script." >&2
+    echo "" >&2
+    echo "Two rules that matter here, learned the hard way on this fork:" >&2
+    echo "  * tsconfig.json / tsconfig.client.json: both sides add spec files to" >&2
+    echo "    the same arrays. Keep BOTH sides' entries." >&2
+    echo "  * lib/: never hand-merge build output. Take either side, then let the" >&2
+    echo "    rebuild below overwrite it." >&2
+    git status --short >&2
+    exit 1
+  fi
 fi
 
 # lib/ is committed, so a merge that only brings source changes would ship a
@@ -150,9 +163,17 @@ fi
 
 if [ "$BUILD_OK" -ne 0 ]; then
   echo "" >&2
-  echo "BUILD FAILED (exit $BUILD_OK). Rewinding the merge commit to $PRE_MERGE_HEAD" >&2
-  echo "so no broken build is committed. Fix the build, then re-run." >&2
-  git reset --hard "$PRE_MERGE_HEAD"
+  echo "BUILD FAILED (exit $BUILD_OK)." >&2
+  if [ "$RESUMED" -eq 1 ]; then
+    # Nothing to rewind to: the merge commit is the only record of the
+    # resolution work, and discarding it would throw that away. Leave it and
+    # let the user fix the build and re-run.
+    echo "The merge is committed; fix the build, then re-run this script to" >&2
+    echo "rebuild lib/ and push." >&2
+  else
+    echo "Rewinding the merge commit to $PRE_MERGE_HEAD so no broken build is committed." >&2
+    git reset --hard "$PRE_MERGE_HEAD"
+  fi
   exit 1
 fi
 
