@@ -5,6 +5,8 @@ English | [中文](./README.md)
 Brings the models available in your signed-in WorkBuddy / WorkBuddy AI desktop app into [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness); the two versions each show their own model group and reuse their own account sign-in and credit.
 
 > **This is a fork of [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect)**, adding "User-Agent defaults read the installed app's version" on top of upstream 0.7.5 (see "Custom User-Agent" and "Compatibility and release history"). Upstream is authoritative: issues and releases live there. This fork has no issue tracker or releases of its own, so every issue / release link below points upstream.
+>
+> Remote layout: `origin` is this fork (the only push target); `upstream` is the original project, fetch-only — its push URL is a non-repository placeholder so an accidental push fails immediately. To merge upstream updates, run `bash scripts/sync-upstream.sh`: fetch upstream, merge, rebuild `lib/`, push to the fork (`--no-push` merges without pushing; `--dry-run` only reports the divergence). If the merge conflicts, resolve as the script instructs and re-run it — it recognises an unfinished merge and carries on.
 
 ## Install
 

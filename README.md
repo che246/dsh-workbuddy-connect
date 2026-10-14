@@ -5,6 +5,8 @@
 将已登录的 WorkBuddy / WorkBuddy AI 桌面应用中可用的模型接入 DeepSeek Harness；两版分别显示各自的模型分组，并沿用各自的账号登录与积分。
 
 > **这是 [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 的 fork**，在上游 0.7.5 之上追加了「User-Agent 默认值读取本机安装版本」的改动（见「User-Agent 自定义」与「版本兼容与历史版本」）。上游是权威版本，issue 与 release 都在上游；本 fork 没有自己的 issue 追踪与 release 发布，故下文所有 issue / release 链接均指向上游。
+>
+> 远端布局：`origin` = 本 fork（唯一推送目标），`upstream` = 原仓库（只读，push URL 已设为不可推送的占位符，误推会直接失败）。合并上游更新用 `bash scripts/sync-upstream.sh`：拉取上游 → 合并 → 重建 `lib/` → 推送到 fork；`--no-push` 只合不推，`--dry-run` 只报告差异。合并遇冲突时按脚本提示解完再重跑即可（它会识别未完成的合并继续走完）。
 
 ## 安装
 
