@@ -7,10 +7,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { WORKBUDDY_AI_PROBE_PATH, WORKBUDDY_AI_STATUS_PATH, WORKBUDDY_PROBE_PATH, WORKBUDDY_STATUS_PATH, isWorkBuddySignedOutReasonCode } from '../status-paths.ts'
 import type { WorkBuddyWebCreditExpiry } from '../status-paths.ts'
-import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
+import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebUaSection, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
 import { isWorkBuddyWebStatus } from './status-document.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 
@@ -333,6 +333,56 @@ const tabActiveStyle: CSSProperties = {
   fontWeight: 600,
 }
 const tabPanelStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 18, paddingTop: 16 }
+
+/** One UA slot's editor block: label, hint, input, preview, actions. */
+const uaBlockStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+  padding: '12px 14px',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 10,
+}
+const uaHeadStyle: CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }
+const uaTitleStyle: CSSProperties = { margin: 0, fontSize: 13, lineHeight: '20px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }
+const uaBadgeStyle: CSSProperties = {
+  fontSize: 11,
+  lineHeight: '18px',
+  padding: '0 7px',
+  borderRadius: 999,
+  border: '1px solid var(--dsw-alias-border-l2)',
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+const uaHintStyle: CSSProperties = { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' }
+/** Monospace, because a UA is compared character by character. */
+const uaInputStyle: CSSProperties = {
+  boxSizing: 'border-box',
+  width: '100%',
+  minHeight: 34,
+  padding: '6px 10px',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-1)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontSize: 12,
+  lineHeight: '20px',
+}
+const uaPreviewStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
+  overflowWrap: 'anywhere',
+  userSelect: 'text',
+}
+const uaPreviewValueStyle: CSSProperties = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  color: 'var(--dsw-alias-label-primary)',
+}
+const uaActionsStyle: CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
+const uaStatusStyle: CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' }
 
 /**
  * Primary action of the inline confirmation. Fill and text colour come from the
@@ -842,6 +892,124 @@ function ProbeSection({ probe, models, t, onDetect, onClear, busy }: {
 }
 
 /** Render WorkBuddy sign-in state and credit as one expandable card. */
+/**
+ * The User-Agent editor: one block per slot, each a template the user can edit
+ * with the shipped default one click away.
+ *
+ * Three deliberate design choices:
+ *
+ * - **The draft lives in local state, not in the document.** The status poll
+ *   replaces the document every minute; an editor whose value came from the
+ *   document would erase what the user was typing mid-edit.
+ * - **The preview comes from the host.** It is the *expanded* value the next
+ *   request would send, computed by the same function the wire path uses, so it
+ *   cannot drift from reality — a client-side re-implementation would.
+ * - **Saving is explicit.** A template is a wire-behaviour change; storing it on
+ *   every keystroke would send half-typed strings to the upstream.
+ */
+function UserAgentSection({ section, disabled, busySlot, error, onSave, onReset, t }: {
+  section: WorkBuddyWebUaSection
+  disabled: boolean
+  busySlot?: string
+  error?: string
+  onSave: (slot: string, template: string) => void
+  onReset: (slot: string) => void
+  t: WorkBuddyPluginCardInjected['t']
+}): ReactNode {
+  /** Drafts by slot; a slot absent from the map is showing its stored template. */
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const save = (slot: string, template: string): void => {
+    onSave(slot, template)
+    setDrafts(previous => {
+      const next = { ...previous }
+      delete next[slot]
+      return next
+    })
+  }
+  return (
+    <div style={tabPanelStyle}>
+      <p style={uaHintStyle}>{t('uaIntro')}</p>
+      {section.slots.map(entry => {
+        const draft = drafts[entry.slot] ?? entry.template
+        const dirty = draft !== entry.template
+        // The labels are per slot; an unknown slot (a newer host) falls back to
+        // its own name rather than rendering an empty heading.
+        const title = entry.slot === 'catalog'
+          ? t('uaSlotCatalog')
+          : entry.slot === 'chat' ? t('uaSlotChat') : entry.slot === 'shared' ? t('uaSlotShared') : entry.slot
+        const hint = entry.slot === 'catalog'
+          ? t('uaSlotCatalogHint')
+          : entry.slot === 'chat' ? t('uaSlotChatHint') : entry.slot === 'shared' ? t('uaSlotSharedHint') : ''
+        const slotBusy = busySlot === entry.slot
+        return (
+          <div key={entry.slot} style={uaBlockStyle}>
+            <div style={uaHeadStyle}>
+              <h4 style={uaTitleStyle}>{title}</h4>
+              <span style={uaBadgeStyle}>{entry.overridden ? t('uaOverridden') : t('uaUsingDefault')}</span>
+            </div>
+            {hint === '' ? null : <p style={uaHintStyle}>{hint}</p>}
+            <input
+              type="text"
+              aria-label={title}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={disabled}
+              value={draft}
+              style={uaInputStyle}
+              onChange={event => { setDrafts(previous => ({ ...previous, [entry.slot]: event.currentTarget.value })) }}
+            />
+            {/*
+              * The preview and the problems render from the *stored* slot, not
+              * from the draft: the host cannot expand an unsaved string, and
+              * showing a locally-guessed expansion would be exactly the kind of
+              * preview that lies. A dirty field therefore says "save to see",
+              * which is also the truth about what will be sent.
+              *
+              * Both are rendered even when the stored template was refused: the
+              * default *is* what goes out in that case, so hiding the preview
+              * would leave the user unable to see the value actually being sent.
+            */}
+            {entry.error === undefined
+              ? null
+              : <p style={errorStyle}>{t('uaInvalid', { reason: entry.error })}</p>}
+            <p style={uaPreviewStyle}>
+              {entry.preview === ''
+                ? t('uaPreviewEmpty')
+                : <>
+                    {`${t('uaPreview')} `.replace('{value}', '')}
+                    <span style={uaPreviewValueStyle}>{entry.preview}</span>
+                  </>}
+            </p>
+            <p style={uaPreviewStyle}>{t('uaCurrentDefault', { value: entry.defaultTemplate })}</p>
+            <div style={uaActionsStyle}>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={disabled || !dirty}
+                onClick={() => { save(entry.slot, draft) }}
+              >
+                {slotBusy ? t('uaSaving') : t('uaSave')}
+              </button>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={disabled || !entry.overridden}
+                onClick={() => { onReset(entry.slot) }}
+              >
+                {t('uaReset')}
+              </button>
+              {entry.missingCliVersion === true ? <span style={uaStatusStyle}>{t('uaMissingCliVersion')}</span> : null}
+              {entry.defaultUnavailable === true ? <span style={uaStatusStyle}>{t('uaDefaultUnavailable')}</span> : null}
+            </div>
+          </div>
+        )
+      })}
+      <p style={uaHintStyle}>{t('uaPlaceholderHint', { list: section.placeholders.map(name => `{${name}}`).join(' ') })}</p>
+      {error === undefined ? null : <p style={errorStyle}>{error}</p>}
+    </div>
+  )
+}
+
 export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyPluginCardProps) {
   if (t === undefined) throw new Error('WorkBuddy plugin card requires its translation function')
   const [open, setOpen] = useState(false)
@@ -885,7 +1053,11 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
   // carries; the two reference sets — context capacity, then rates and the
   // per-package breakdown — are deliberate visits, since neither changes while
   // you watch.
-  const [tab, setTab] = useState<'status' | 'context' | 'details'>('status')
+  const [tab, setTab] = useState<'status' | 'context' | 'details' | 'ua'>('status')
+  /** The UA slot whose write is in flight, so only that block's Save reads busy. */
+  const [savingUaSlot, setSavingUaSlot] = useState<string>()
+  /** Why the last UA write was refused, shown beside the editor. */
+  const [uaError, setUaError] = useState<string>()
   const mounted = useRef(true)
   /**
    * Identity of the newest read that may write. Assigned when a read *starts*,
@@ -1122,6 +1294,52 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
     void control({ action: 'probe', model: modelId })
   }, [control])
 
+  /**
+   * Store or clear one UA override, then refresh so the new preview and the new
+   * provenance reach the screen together.
+   *
+   * Shares `control`'s guards and key: it is a write, so it does not belong on
+   * the read-only status GET. The reason for a refusal is kept in `uaError`
+   * rather than in `readFailure`: a rejected template is about the editor's own
+   * field, and the notice beside it is where the user is looking.
+   */
+  const writeUserAgent = useCallback(async (slot: string, template: string | null): Promise<void> => {
+    const key = status?.status === 'signed-in' ? status.probeKey : undefined
+    if (key === undefined) return
+    setSavingUaSlot(slot)
+    setUaError(undefined)
+    const controller = trackController()
+    try {
+      const response = await fetch(variant.probePath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-WorkBuddy-Probe-Key': key },
+        credentials: 'same-origin',
+        signal: controller.signal,
+        body: JSON.stringify({ action: 'set-user-agent', slot, template }),
+      })
+      const value: unknown = await response.json().catch(() => undefined)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      // The write must confirm itself: a `failed` state means the host did not
+      // store the template, and leaving the field looking saved would send the
+      // user to diagnose the upstream over a value that never took effect.
+      const state = typeof value === 'object' && value !== null ? (value as Record<string, unknown>)['state'] : undefined
+      if (state !== 'updated') {
+        const reason = typeof value === 'object' && value !== null && 'reason' in value
+          ? String((value as Record<string, unknown>)['reason'])
+          : t('requestFailed')
+        throw new Error(reason)
+      }
+      await refresh(controller.signal)
+    } catch (error: unknown) {
+      if (mounted.current && controller.signal.aborted !== true) {
+        setUaError(t('uaInvalid', { reason: error instanceof Error ? error.message : t('requestFailed') }))
+      }
+    } finally {
+      manualControllers.current.delete(controller)
+      if (mounted.current) setSavingUaSlot(undefined)
+    }
+  }, [refresh, status, t, trackController, variant.probePath])
+
   const title = t(variant.titleKey)
   /**
    * The failure the assist block covers, when this document has one. Computed
@@ -1243,7 +1461,19 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                     * decision-relevant.
                     */}
                   <div role="tablist" style={tabBarStyle}>
-                    {(['status', 'context', 'details'] as const).map(id => (
+                    {/*
+                      * The UA tab exists only when the document carries the
+                      * section — its presence is the host's capability signal,
+                      * the same convention `useMaximumContextWindow` follows.
+                      * Rendering a tab that could only say "not supported"
+                      * would be worse than not offering it.
+                    */}
+                    {([
+                      ['status', 'tabStatus'],
+                      ['context', 'tabContext'],
+                      ['details', 'tabDetails'],
+                      ...status.userAgent === undefined ? [] : [['ua', 'tabUserAgent'] as const],
+                    ] as const).map(([id, key]) => (
                       <button
                         key={id}
                         type="button"
@@ -1252,7 +1482,7 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                         onClick={() => { setTab(id) }}
                         style={{ ...tabStyle, ...(tab === id ? tabActiveStyle : {}) }}
                       >
-                        {t(id === 'status' ? 'tabStatus' : id === 'context' ? 'tabContext' : 'tabDetails')}
+                        {t(key)}
                       </button>
                     ))}
                   </div>
@@ -1330,6 +1560,16 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                         }}
                       />
                     </div>
+                  ) : tab === 'ua' && status.userAgent !== undefined ? (
+                    <UserAgentSection
+                      section={status.userAgent}
+                      disabled={savingUaSlot !== undefined}
+                      {...savingUaSlot === undefined ? {} : { busySlot: savingUaSlot }}
+                      {...uaError === undefined ? {} : { error: uaError }}
+                      onSave={(slot, template) => { void writeUserAgent(slot, template) }}
+                      onReset={slot => { void writeUserAgent(slot, null) }}
+                      t={t}
+                    />
                   ) : (
                     <div style={tabPanelStyle}>
                       {status.credits === undefined ? null : (

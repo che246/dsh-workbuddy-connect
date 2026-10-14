@@ -95,9 +95,11 @@ declare function resolveAppVersion(options?: ResolveAppVersionOptions): Promise<
 /**
  * Build the App-shaped User-Agent for catalog requests.
  *
- * `WorkBuddyAI/<version>` with no space is the form measured to reach the App
- * document; the space form is rejected with 400/12403. Throws on an invalid
- * version rather than sending a malformed header.
+ * `WorkBuddyAI/<version>` matches the form the international app itself sends.
+ * The no-space form is a *choice*, not a requirement: the gateway accepts the
+ * space form too (re-measured 2026-10-15 — see the module header), and it
+ * validates only that some `name/version` token is present. Throws on an
+ * invalid version rather than sending a malformed header.
  */
 declare function appUserAgent(version: string): string;
 //#endregion
@@ -247,7 +249,195 @@ declare function probeModel(options: {
   region?: ProbeRegion;
 }): Promise<ProbeOutcome>;
 //#endregion
+//#region src/ua-template.d.ts
+/**
+ * User-agent templates: the shape of every UA this plugin sends, plus the
+ * placeholder expansion and validation that let a user replace them.
+ *
+ * Three slots cover every request the plugin makes, because the upstream keys
+ * on client identity in three different ways and each one has to stay
+ * internally consistent:
+ *
+ * - `catalog` — the `GET /v3/config` model-list request. The gateway splits
+ *   that document by UA: a UA carrying a `CLI/…` segment *together with* a
+ *   `CodeBuddy/…` segment yields the CLI roster, any other recognized
+ *   `name/version` token yields the App roster. Measured on 2026-10-15: 19
+ *   models for the CLI form, 24 for every App-shaped form, and `400 check ua,
+ *   get coding copilot version error` for a UA with no recognizable token at
+ *   all. The version numbers themselves are not validated.
+ * - `chat` — chat streaming and the reasoning-effort probe, which present as
+ *   the desktop client (`WorkBuddy/<v> <product>/<v> CLI/<cli>`).
+ * - `shared` — token refresh and the CN console/badge read, which have always
+ *   sent one CLI-form UA.
+ *
+ * **Why templates rather than free text.** Several parts of a UA are facts the
+ * plugin reads from the installed app (its version, its bundled CLI version),
+ * and one part names the product. A literal string would freeze today's facts
+ * into a file and rot; a template keeps the user in control of the *shape*
+ * while the plugin keeps supplying the values. Each default template expands to
+ * the UA this plugin sent before the placeholder became editable, with the
+ * versions taken from the local install rather than from a release constant.
+ *
+ * This module is deliberately Node-free: the browser half imports it to render
+ * the live preview, so it must stay loadable from the client bundle.
+ *
+ * @module dsh-workbuddy-connect/ua-template
+ */
+/** The two products the plugin serves. Kept local so this module stays Node-free. */
+type UaRegion = 'cn' | 'global';
+/** Which UA a request family sends. */
+declare const UA_SLOTS: readonly ["catalog", "chat", "shared"];
+/** One UA slot's name. */
+type UaSlot = typeof UA_SLOTS[number];
+/** Whether a value names a slot this module knows. */
+declare function isUaSlot(value: unknown): value is UaSlot;
+/**
+ * Placeholders a template may use.
+ *
+ * `appVersion` and `cliVersion` come from the installed app through
+ * `app-install.ts`, falling back to `client-identity.ts`; `product` names the
+ * product the app calls itself, or the region's conventional spelling. An
+ * unavailable placeholder drops its whole whitespace-delimited token rather
+ * than leaving `CLI/` behind — that is the official client's own rule for a
+ * missing extension, and it is what a *user-written* template relies on.
+ *
+ * A shipped default is held to a stricter rule: see
+ * {@link templateResolvesCompletely} for why a half-expanded default is never
+ * sent, and how measurement forced that.
+ */
+declare const UA_PLACEHOLDERS: readonly ["appVersion", "cliVersion", "product"];
+/** One placeholder's name. */
+type UaPlaceholder = typeof UA_PLACEHOLDERS[number];
+/** Longest template accepted; real ones are well under 100 characters. */
+declare const UA_MAX_TEMPLATE_LENGTH = 512;
+/** Values the placeholders expand to. */
+interface UaContext {
+  /** Desktop app version, e.g. `5.7.6`. */
+  appVersion?: string | undefined;
+  /** The app's bundled agent-CLI version, when it could be read. */
+  cliVersion?: string | undefined;
+  /** The region's product token, e.g. `WorkBuddy AI`. */
+  product?: string | undefined;
+}
+/** Why a template was refused. */
+type UaTemplateError = 'empty' | 'control-char' | 'too-long' | 'unknown-placeholder';
+/**
+ * The default template for one slot and region.
+ *
+ * These reproduce what this plugin sent before it became editable, except that
+ * every version is now a placeholder the host fills from the *installed app*
+ * (`app-install.ts`) rather than a constant compiled into a release. That is
+ * the point: the upstream reads the User-Agent to decide which model roster to
+ * return, and the official apps identify themselves with their own installed
+ * version — so a frozen version drifts the moment the user updates the app.
+ *
+ * The CN model list keeps the CLI identity its own chat requests use, so the
+ * roster it advertises is the one those requests can use; the international
+ * document is served to an App-shaped UA. Measured on this machine with the
+ * real apps: CN 5.5.4 and international 5.7.6 both work in their own slots.
+ */
+declare function defaultUaTemplate(slot: UaSlot, region: UaRegion): string;
+/**
+ * Whether a template may be stored and sent.
+ *
+ * Strict on purpose: this string is interpolated into an HTTP header, so
+ * anything that could split the request (CR, LF, other control characters) must
+ * never pass, and an unknown `{name}` is refused rather than left literal — a
+ * typo would otherwise reach the wire looking like syntax the gateway may act
+ * on.
+ */
+declare function validateUaTemplate(template: string): UaTemplateError | undefined;
+/**
+ * Expand one template.
+ *
+ * A token that still carries an unresolved placeholder after substitution is
+ * dropped whole, then surviving tokens are joined by single spaces — so
+ * `WorkBuddy/{appVersion} CLI/{cliVersion}` with no CLI version yields
+ * `WorkBuddy/5.5.6`, never `WorkBuddy/5.5.6 CLI/`. Whitespace in the template
+ * is normalized, because a UA with a stray double space is a different string
+ * to anything matching on it.
+ */
+declare function expandUaTemplate(template: string, context: UaContext): string;
+/**
+ * The compiled-in UA every slot falls back to when no template can expand.
+ *
+ * Reachable in two situations, both of which want the value this plugin has
+ * always sent: a context carrying no version at all, and a default template
+ * whose placeholders cannot all be filled on this machine. Sending a
+ * half-expanded default would be worse — see {@link templateResolvesCompletely}.
+ */
+declare const UA_SHARED_FALLBACK = "CLI/2.63.2 CodeBuddy/2.63.2";
+/**
+ * The UA to actually send.
+ *
+ * Degradation order: the stored override when it is still valid and expands to
+ * something → the slot's default template, but only when it expands
+ * *completely* → the compiled-in literal. The completeness condition is the
+ * difference between a graceful fallback and a silent wrong answer; see
+ * {@link templateResolvesCompletely}.
+ */
+declare function resolveUserAgent(override: string | undefined, defaults: {
+  template: string;
+  fallback: string;
+}, context: UaContext): string;
+/** One slot's effective state, as both the wire and the card need it. */
+interface UaSlotPlan {
+  slot: UaSlot;
+  /** The template in effect: the override when one is stored, else the default. */
+  template: string;
+  /** The template this plugin ships with for this slot and region. */
+  defaultTemplate: string;
+  /** Whether `template` is a stored override rather than the shipped default. */
+  overridden: boolean;
+  /** The exact header value the next request on this slot would send. */
+  preview: string;
+  /**
+   * Something the stored template was refused for, so the card can explain why
+   * the preview does not match what was typed. Absent for a default.
+   */
+  error?: UaTemplateError;
+  /**
+   * The shipped default needs a value this machine could not supply, so the
+   * preview below shows the compiled-in literal instead.
+   *
+   * Set only for an un-overridden slot: it explains a preview that visibly
+   * differs from the template in the field, which would otherwise read as a
+   * bug. Never set alongside `error`, which is about a stored override.
+   */
+  defaultUnavailable?: true;
+}
+/**
+ * Resolve one slot for display and for the wire.
+ *
+ * The host calls this to build a request; the card calls the very same function
+ * through the status document's values, so a preview can never disagree with
+ * what is sent — which is the only reason a preview is worth rendering at all.
+ *
+ * A stored template that fails validation is *reported*, not applied: the wire
+ * keeps sending the default (see {@link resolveUserAgent}) while the card says
+ * why, rather than silently accepting a header the plugin would refuse.
+ */
+declare function planUaSlot(slot: UaSlot, region: UaRegion, override: string | undefined, context: UaContext): UaSlotPlan;
+//#endregion
 //#region src/upstream.d.ts
+/**
+ * The expansion values for one region.
+ *
+ * Shared by all three slots so `{appVersion}` means the same thing wherever a
+ * user writes it: the version read from the machine's own install
+ * (`app-install.ts`), falling back to the identity chain's compiled-in value.
+ * A user override may never mix one product's version into the other's slot,
+ * which is why this takes the region rather than reading anything global.
+ *
+ * Exported because the card's preview must use the *same* function: a second
+ * implementation would eventually disagree with the wire, which is exactly what
+ * a preview must never do.
+ */
+declare function uaContextOf(region: WorkBuddyRegion, identity: ChatIdentity | undefined, installed?: {
+  appVersion?: string;
+  cliVersion?: string;
+  productName?: string;
+}): UaContext;
 /** WorkBuddy region selected by the credential's login domain. */
 type WorkBuddyRegion = 'cn' | 'global';
 /** Upstream failure classes the shim maps onto distinct HTTP answers. */
@@ -465,6 +655,31 @@ interface WorkBuddyUpstreamClientOptions {
    * billing never consult it — those requests keep their long-standing headers.
    */
   resolveChatIdentity?: (region: WorkBuddyRegion) => Promise<ChatIdentity>;
+  /**
+   * Read the stored UA override for one slot, or undefined for the default.
+   *
+   * Read per request rather than captured once: the card edits this file while
+   * the plugin is running, and a UA change that only took effect after a
+   * restart would be diagnosed as an upstream problem. Defaults to "no
+   * override", which is what a bare test client wants.
+   */
+  uaOverride?: (slot: UaSlot, region: WorkBuddyRegion) => string | undefined;
+  /**
+   * The installed desktop app's identity for one region, for UA expansion.
+   *
+   * Supplied by `index.ts`, which owns the mapping from region to variant and
+   * the process-wide memoisation. Defaults to "nothing installed", so a bare
+   * test client expands from the identity chain exactly as it did before this
+   * seam existed. Async because on Windows the first read may need the
+   * uninstall registry, which is a subprocess.
+   */
+  installedIdentity?: (region: WorkBuddyRegion) => Promise<InstalledAppIdentity>;
+}
+/** The installed-app values one region contributes to UA expansion. */
+interface InstalledAppIdentity {
+  appVersion?: string;
+  cliVersion?: string;
+  productName?: string;
 }
 /**
  * Upstream HTTP client. One instance serves the whole plugin; requests take
@@ -482,9 +697,50 @@ declare class WorkBuddyUpstreamClient {
   private readonly resolveAppVersion;
   /** Chat-identity resolver; see {@link WorkBuddyUpstreamClientOptions.resolveChatIdentity}. */
   private readonly resolveChatIdentity;
+  /**
+   * UA-override reader; see {@link WorkBuddyUpstreamClientOptions.uaOverride}.
+   */
+  private readonly uaOverride;
+  /**
+   * The installed-app identity for one region.
+   *
+   * Read per request so a UA never goes stale behind a cache the caller
+   * controls; `index.ts` supplies the process-wide memoisation, because only it
+   * knows which variant owns which product.
+   */
+  private readonly installedIdentity;
   /** Provenance of the most recent successful catalog fetch, for the card. */
   lastCatalog: WorkBuddyCatalogFetch | undefined;
   constructor(options?: WorkBuddyUpstreamClientOptions);
+  /** The installed-app values one region contributes, best-effort. */
+  private installedValues;
+  /**
+   * The `shared` UA slot: refresh and the CN console read.
+   *
+   * These requests have never carried a desktop identity of their own, so the
+   * default template names no product — but the *version* still comes from the
+   * local install, because that is what the app's own CLI requests do and it is
+   * what keeps this slot from drifting when the app updates.
+   */
+  private sharedUserAgent;
+  /** The `chat` slot for one resolved identity. */
+  private chatUserAgentFor;
+  /**
+   * The `catalog` slot for one region.
+   *
+   * Every slot is expanded from the *same* context function, so `{appVersion}`
+   * means the same thing wherever a user writes it — and a template using it on
+   * the CN catalog slot is no longer silently reduced to the default.
+   */
+  private catalogUserAgentFor;
+  /**
+   * Resolve a chat identity, degrading exactly as the chat path does.
+   *
+   * Shared so a UA slot cannot disagree with the chat request about who the
+   * client is: any failure — a thrown resolver included — falls back to the
+   * compiled-in identity rather than propagating.
+   */
+  private identityFor;
   /** POST the chat endpoint; a successful answer is the raw SSE response. */
   chatStream(credential: WorkBuddyCredential, bodyJson: string, signal?: AbortSignal): Promise<WorkBuddyChatResult>;
   /** POST the token-refresh endpoint; the caller merges the outcome. */
@@ -502,11 +758,19 @@ declare class WorkBuddyUpstreamClient {
    *
    * What distinguishes the two variants here is the User-Agent, not the path:
    * the gateway splits `/v3/config` by client identity, and the split is
-   * load-bearing. A CLI-shaped UA yields the CLI's roster — the chat models
-   * this plugin serves — while an App-shaped UA yields the App's internal
-   * roster. CN keeps the CLI UA it sends for chat, so the catalog it
-   * advertises is exactly the one its own requests can use. The international
-   * variant has no CLI identity, so it keeps the App-shaped UA.
+   * load-bearing. A UA carrying both a `CLI/…` and a `CodeBuddy/…` segment
+   * yields the CLI's roster — the chat models this plugin serves — while any
+   * other recognized `name/version` token yields the App's internal roster
+   * (measured 2026-10-15: 19 models against 24). CN keeps the CLI UA it sends
+   * for chat, so the catalog it advertises is exactly the one its own requests
+   * can use. The international variant has no CLI identity, so it keeps the
+   * App-shaped UA.
+   *
+   * The split is *binary on those two segments*, not on a product name: the
+   * version numbers inside them are not validated, and the `CodeBuddy` segment
+   * must be present or the CLI form answers 400. That is why a half-expanded
+   * CLI template is worse than falling back to the compiled literal — see
+   * `templateResolvesCompletely` in `ua-template.ts`.
    *
    * Membership is the `cli` roster intersected with the usable rows (see
    * {@link parseModelCatalog}); the promo badges the product document does
@@ -1517,6 +1781,54 @@ declare class WorkBuddyVisibilityStore {
   private persist;
 }
 //#endregion
+//#region src/ua-store.d.ts
+/** Basename of the CN variant's UA-override file inside the Harness home. */
+declare const WORKBUDDY_UA_FILENAME = ".workbuddy-user-agent.json";
+/** One variant's overrides: only the slots the user actually edited. */
+type SavedUa = Partial<Record<UaSlot, string>>;
+/** Plugin-owned UA-override file path inside the Harness home. */
+declare function workbuddyUaPath(filename?: string): string;
+/** Options for {@link WorkBuddyUserAgentStore}. */
+interface WorkBuddyUserAgentStoreOptions {
+  /** Explicit state-file path, overriding the `$DSH_HOME` default. */
+  path?: string;
+}
+/**
+ * The per-variant UA overrides, read once and written atomically.
+ *
+ * An absent entry and a `{template: undefined}` entry mean the same thing —
+ * "send the default" — so clearing an override deletes the key rather than
+ * storing an empty string, and the file never accumulates blanks.
+ *
+ * A failed *write* propagates, exactly like the visibility store: a UA the user
+ * believes they changed but that did not persist would be diagnosed as an
+ * upstream problem. Reads stay forgiving — a corrupt file is "nothing
+ * overridden", which only ever sends the default this plugin shipped with.
+ */
+declare class WorkBuddyUserAgentStore {
+  private readonly path;
+  private variants;
+  constructor(options?: WorkBuddyUserAgentStoreOptions | string);
+  /** Resolved state-file path, for the CLI and tests. */
+  filePath(): string;
+  private load;
+  /** One variant's stored override for one slot, or undefined for the default. */
+  override(variantId: string, slot: UaSlot): string | undefined;
+  /** Every stored override for one variant, as a copy. */
+  overrides(variantId: string): SavedUa;
+  /**
+   * Store or clear one slot's override, persisting before committing.
+   *
+   * `template === undefined` clears it. Throws when the write fails, leaving
+   * the in-memory state untouched so a re-read cannot lie about what was
+   * persisted — the caller reports the failure instead of answering "saved".
+   */
+  setOverride(variantId: string, slot: UaSlot, template: string | undefined): void;
+  /** Clear every override for one variant. */
+  clear(variantId: string): void;
+  private persist;
+}
+//#endregion
 //#region src/probe-service.d.ts
 /** What the caller learns about a completed probe. */
 type WorkBuddyProbeStatus = {
@@ -1586,6 +1898,144 @@ declare class WorkBuddyProbeService {
    */
   probe(modelId: string, manualConsent?: boolean): Promise<WorkBuddyProbeStatus>;
 }
+//#endregion
+//#region src/app-install.d.ts
+/** Where a resolved version came from, for `doctor` and the card. */
+type InstalledVersionSource =
+/** The app's bundled `cli/product.json`. */
+'product-json' |
+/** A Windows uninstall record's `DisplayVersion`. */
+'registry' |
+/** A macOS `Info.plist`'s `CFBundleShortVersionString`. */
+'bundle' |
+/** The last value this plugin successfully read. */
+'saved' |
+/** The compiled-in constant; no app was found. */
+'fallback';
+/** One product's installed version plus where it came from. */
+interface InstalledVersion {
+  version: string;
+  source: InstalledVersionSource;
+  /** The product token the app calls itself, when the source declared one. */
+  productName?: string;
+  /** The install directory the version was read from, when there was one. */
+  installRoot?: string;
+}
+/**
+ * Versions this module accepts.
+ *
+ * The same shape the User-Agent validators use: dotted numerics, optionally
+ * with a prerelease suffix. Anything else — `unknown`, an empty string, a
+ * marketing name — is refused rather than interpolated into a header.
+ */
+declare function validVersion(value: unknown): value is string;
+/** Basename of the saved per-product version under `$DSH_HOME`. */
+declare const WORKBUDDY_INSTALLED_VERSION_FILENAME = ".workbuddy-installed-version.json";
+/** Plugin-owned cache path inside the Harness home. */
+declare function installedVersionPath(filename?: string): string;
+/**
+ * Read `<installRoot>/resources/app.asar.unpacked/cli/product.json`.
+ *
+ * The app's own statement of its identity: `genieVersion` is the installed
+ * version, `productName` the token the app uses in its User-Agent. Verified on
+ * this machine for both products — CN gives `5.5.4`/`WorkBuddy`, the
+ * international build `5.7.6`/`WorkBuddy AI`.
+ */
+declare function readBundledProductJson(installRoot: string): {
+  version: string;
+  productName?: string;
+} | undefined;
+/**
+ * Read the app's bundled agent-CLI version.
+ *
+ * `cli/package.json` ships a `0.0.0` placeholder with the real version under
+ * `publishConfig.customPackage.version`; a valid non-placeholder `version`
+ * wins, otherwise the custom-package value applies, and unreadable or invalid
+ * metadata yields `undefined` rather than a guess. This is the same rule
+ * `client-identity.ts` applies to the same file — kept here as well so the
+ * version reader is self-contained, and verified on this machine to give
+ * 2.137.1 for CN and 2.156.0 for the international build.
+ */
+declare function readBundledCliVersion(installRoot: string): string | undefined;
+/**
+ * Read each product's `DisplayVersion` and icon path from the Windows
+ * uninstall records.
+ *
+ * Returns the icon candidates (so `installRootsFor` can probe the real install
+ * directory, wherever the user put it — issue #105) and the versions keyed by
+ * the lower-cased icon path.
+ *
+ * Reuses `workBuddyWindowsDiscoveryTools()` — the very reader credential
+ * discovery uses, including its `reg.exe`-then-PowerShell-5.1 encoding
+ * fallback — rather than growing a second one. A second implementation would
+ * be one Windows release away from disagreeing about where a product lives.
+ *
+ * Best-effort by construction: an unreadable root yields nothing rather than a
+ * failure, because a version is metadata for a request and the next source in
+ * the chain can answer instead.
+ */
+declare function readWindowsInstallRecords(variant: WorkBuddyVariant, signal: AbortSignal): Promise<{
+  iconCandidates: string[];
+  versions: Map<string, string>;
+  installRoots: string[];
+}>;
+/**
+ * Resolve one product's version, reading the Windows registry when it has to.
+ *
+ * The async sibling of {@link resolveInstalledVersion}, for the case where the
+ * registry has not been read yet. `index.ts` uses this once per product; the
+ * synchronous version then serves the request path.
+ */
+declare function resolveInstalledVersionAsync(variant: WorkBuddyVariant, signal: AbortSignal, options?: ResolveInstalledVersionOptions): Promise<InstalledVersion>;
+/** Constructor dependencies; every reader injectable so tests touch no real machine. */
+interface ResolveInstalledVersionOptions {
+  /** Registry icon candidates, when a Windows discovery already produced them. */
+  windowsIconCandidates?: readonly string[];
+  /** Registry version by candidate path (lower-cased). */
+  registryVersions?: ReadonlyMap<string, string>;
+  /** Saved-cache path; defaults to `$DSH_HOME/.workbuddy-installed-version.json`. */
+  savedPath?: string;
+  /** Install-root discovery; defaults to {@link installRootsFor}. */
+  installRoots?: (variant: WorkBuddyVariant) => readonly string[];
+  /** `product.json` reader; defaults to {@link readBundledProductJson}. */
+  readProductJson?: (installRoot: string) => {
+    version: string;
+    productName?: string;
+  } | undefined;
+  /** macOS plist reader; defaults to {@link readBundleVersion}. */
+  readBundle?: (plistPath: string) => string | undefined;
+  /** Whether an install root looks like this product's; defaults to a stat of its exe. */
+  looksInstalled?: (variant: WorkBuddyVariant, installRoot: string) => boolean;
+}
+/**
+ * Resolve one product's installed version, best source first.
+ *
+ * Never throws, and never returns an unusable version: every candidate is
+ * validated before it is accepted, so a malformed `product.json` degrades to
+ * the next source rather than reaching a header.
+ */
+declare function resolveInstalledVersion(variant: WorkBuddyVariant, options?: ResolveInstalledVersionOptions): InstalledVersion;
+/** Begin resolving one product's identity, without waiting for it. */
+declare function beginInstalledIdentity(variant: WorkBuddyVariant, options?: ResolveInstalledVersionOptions): void;
+/**
+ * Read one product's identity, resolving it once per process.
+ *
+ * Never rejects: a failing reader degrades to the next source inside
+ * {@link resolveInstalledVersionAsync}, and this wrapper is the last line of
+ * defence so a caller can await it unconditionally.
+ */
+declare function installedIdentity(variant: WorkBuddyVariant, options?: ResolveInstalledVersionOptions): Promise<InstalledVersion>;
+/**
+ * The identity as it stands *right now*, for a synchronous request path.
+ *
+ * Returns `undefined` while the first resolution is still in flight, so the
+ * caller falls back to the identity chain rather than blocking on a subprocess.
+ * Once anything has resolved — including the "no app here" answer — this always
+ * answers, so a request never pays for a second read.
+ */
+declare function installedIdentityNow(variant: Pick<WorkBuddyVariant, 'id'>): InstalledVersion | undefined;
+/** Drop the cache, so the next read re-resolves (the card's Refresh does this). */
+declare function forgetInstalledIdentity(variantId?: string): void;
 //#endregion
 //#region src/host-heartbeat.d.ts
 /**
@@ -1725,4 +2175,4 @@ declare function visibilityAccountOf(credential: Pick<WorkBuddyCredential, 'uid'
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { AI_VARIANT, type AppVersionInfo, CN_APP_VERSION_FILENAME, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, chatUserAgent, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeCredits, parseModelCatalog, parseWorkBuddyAuth, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, randomSentinel, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyVisibilityPath };
+export { AI_VARIANT, type AppVersionInfo, CN_APP_VERSION_FILENAME, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, type InstalledVersion, type InstalledVersionSource, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type ResolveInstalledVersionOptions, UA_MAX_TEMPLATE_LENGTH, UA_PLACEHOLDERS, UA_SHARED_FALLBACK, UA_SLOTS, type UaContext, type UaPlaceholder, type UaRegion, type UaSlot, type UaSlotPlan, type UaTemplateError, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_INSTALLED_VERSION_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_UA_FILENAME, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, WorkBuddyUserAgentStore, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, beginInstalledIdentity, chatUserAgent, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, defaultUaTemplate, desktopAuthCandidatesFor, expandUaTemplate, fallbackChatIdentity, fingerprintModel, forgetInstalledIdentity, inject, installedAppVersion, installedIdentity, installedIdentityNow, installedVersionPath, isHeartbeatProcessAlive, isUaSlot, modelWithCurrentPromotion, name, normalizeCredits, parseModelCatalog, parseWorkBuddyAuth, planUaSlot, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, randomSentinel, readBundleVersion, readBundledCliVersion, readBundledProductJson, readCliVersion, readHostHeartbeat, readWindowsInstallRecords, regionOf, resolveAppVersion, resolveChatIdentity, resolveInstalledVersion, resolveInstalledVersionAsync, resolveUserAgent, uaContextOf, validAppVersion, validCliVersion, validVersion, validateUaTemplate, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyUaPath, workbuddyVisibilityPath };

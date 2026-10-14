@@ -62,6 +62,15 @@ export interface WorkBuddyProbeRouteOptions {
    */
   setModelVisibility?: (modelId: string, visible: boolean, expectedAccount: string) => Promise<{ state: string; reason?: string }>
   /**
+   * Store or clear one UA override. `template === null` clears it.
+   *
+   * The host validates the template before writing and refuses an unusable one
+   * with a reason — a header the plugin would not send must never be reported
+   * as saved, and a template that silently reached a header could split the
+   * request.
+   */
+  setUserAgent?: (slot: string, template: string | null) => Promise<{ state: string; reason?: string }>
+  /**
    * Route path to mount. Defaults to the CN variant's path so existing callers
    * and tests keep their behaviour; the international variant passes its own.
    */
@@ -132,6 +141,17 @@ function parseAction(text: string): WorkBuddyProbeAction | undefined {
     if (typeof wrapped['visible'] !== 'boolean') return undefined
     if (typeof account !== 'string' || account === '') return undefined
     return { action: 'set-model-visibility', model: model.trim(), visible: wrapped['visible'], account }
+  }
+  if (action === 'set-user-agent') {
+    const slot = wrapped['slot']
+    const template = wrapped['template']
+    // The slot is required: without it there is no honest target, and routing a
+    // bare template to one of three slots by guesswork would change a request
+    // family the user never named. `null` is the explicit "back to default".
+    if (typeof slot !== 'string' || slot === '') return undefined
+    if (template === null) return { action: 'set-user-agent', slot, template: null }
+    if (typeof template !== 'string') return undefined
+    return { action: 'set-user-agent', slot, template }
   }
   if (action === 'probe') {
     const model = wrapped['model']
@@ -204,6 +224,14 @@ export function workBuddyProbeHandler(
           action.visible === true,
           action.account as string,
         ))
+        return
+      }
+      if (action.action === 'set-user-agent') {
+        if (deps.setUserAgent === undefined) {
+          json(res, 404, { error: 'user-agent-setting-not-supported' })
+          return
+        }
+        json(res, 200, await deps.setUserAgent(action.slot as string, action.template ?? null))
         return
       }
       json(res, 200, await deps.probe(action.model as string))

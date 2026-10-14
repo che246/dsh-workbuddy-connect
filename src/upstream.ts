@@ -12,6 +12,39 @@ import { chatUserAgent, fallbackChatIdentity, resolveChatIdentity, type ChatIden
 import type { WorkBuddyCredential } from './auth.ts'
 import type { ProbeAttempt } from './probe.ts'
 import { PROBE_MAX_TOKENS, PROBE_PROMPT } from './probe.ts'
+import { defaultUaTemplate, resolveUserAgent, type UaContext, type UaSlot } from './ua-template.ts'
+
+/**
+ * The expansion values for one region.
+ *
+ * Shared by all three slots so `{appVersion}` means the same thing wherever a
+ * user writes it: the version read from the machine's own install
+ * (`app-install.ts`), falling back to the identity chain's compiled-in value.
+ * A user override may never mix one product's version into the other's slot,
+ * which is why this takes the region rather than reading anything global.
+ *
+ * Exported because the card's preview must use the *same* function: a second
+ * implementation would eventually disagree with the wire, which is exactly what
+ * a preview must never do.
+ */
+export function uaContextOf(
+  region: WorkBuddyRegion,
+  identity: ChatIdentity | undefined,
+  installed: { appVersion?: string, cliVersion?: string, productName?: string } = {},
+): UaContext {
+  // The installed app leads; the identity chain is what remains when it cannot
+  // be read (a machine with no app, or one whose layout changed).
+  const appVersion = installed.appVersion ?? identity?.clientVersion
+  const cliVersion = installed.cliVersion ?? identity?.cliVersion
+  return {
+    ...appVersion === undefined ? {} : { appVersion },
+    ...cliVersion === undefined ? {} : { cliVersion },
+    // The product token comes from the app's own `productName` when it declared
+    // one, so the UA names the product the way that app does. The region's
+    // conventional spelling is the fallback.
+    product: installed.productName ?? (region === 'global' ? 'WorkBuddy AI' : 'WorkBuddy'),
+  }
+}
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -227,7 +260,14 @@ function describeShape(document: unknown): string {
   return `${top}; data { ${at(data as Record<string, unknown>)} }`
 }
 
-/** Shared CLI-form User-Agent for refresh and the CN catalog; chat and probe present the desktop identity (client-identity.ts). */
+/**
+ * Shared CLI-form User-Agent for refresh and the CN catalog; chat and probe
+ * present the desktop identity (client-identity.ts).
+ *
+ * The value is now the *fallback* of the `shared` UA slot: an install with no
+ * override and a resolvable app expands to exactly this string, and this
+ * constant is what a context that resolves nothing still sends.
+ */
 const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
@@ -423,13 +463,13 @@ function originReferer(credential: WorkBuddyCredential): string {
 }
 
 /** Headers every upstream request shares. */
-function commonHeaders(credential: WorkBuddyCredential): Record<string, string> {
+function commonHeaders(credential: WorkBuddyCredential, userAgent: string): Record<string, string> {
   return {
     'Accept': 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
     'Origin': originReferer(credential),
     'Referer': `${originReferer(credential)}/`,
-    'User-Agent': CLIENT_UA,
+    'User-Agent': userAgent,
   }
 }
 
@@ -437,13 +477,16 @@ function commonHeaders(credential: WorkBuddyCredential): Record<string, string> 
  * Chat request headers, including the X-No-* conventions the official CLI uses.
  *
  * `userAgent` and `clientVersion` carry the same resolved desktop identity for
- * chat and probe requests. Refresh shares `commonHeaders` but never this
+ * chat and probe requests. Refresh passes its own `shared` UA and never this
  * override, so the two paths cannot drift into each other.
  */
-function chatHeaders(credential: WorkBuddyCredential, userAgent: string, clientVersion: string): Record<string, string> {
+function chatHeaders(
+  credential: WorkBuddyCredential,
+  userAgent: string,
+  clientVersion: string,
+): Record<string, string> {
   const headers: Record<string, string> = {
-    ...commonHeaders(credential),
-    'User-Agent': userAgent,
+    ...commonHeaders(credential, userAgent),
     'Content-Type': 'application/json',
     // 安全红线：chat 请求绝不携带 refresh token。
     ...credential.uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': credential.uid },
@@ -460,9 +503,9 @@ function chatHeaders(credential: WorkBuddyCredential, userAgent: string, clientV
 }
 
 /** Refresh-endpoint headers; X-Refresh-Token appears here and nowhere else. */
-function refreshHeaders(credential: WorkBuddyCredential): Record<string, string> {
+function refreshHeaders(credential: WorkBuddyCredential, userAgent: string): Record<string, string> {
   const headers: Record<string, string> = {
-    ...commonHeaders(credential),
+    ...commonHeaders(credential, userAgent),
     'X-Refresh-Token': credential.refreshToken,
     'X-Auth-Refresh-Source': 'workbuddy',
   }
@@ -629,6 +672,32 @@ export interface WorkBuddyUpstreamClientOptions {
    * billing never consult it — those requests keep their long-standing headers.
    */
   resolveChatIdentity?: (region: WorkBuddyRegion) => Promise<ChatIdentity>
+  /**
+   * Read the stored UA override for one slot, or undefined for the default.
+   *
+   * Read per request rather than captured once: the card edits this file while
+   * the plugin is running, and a UA change that only took effect after a
+   * restart would be diagnosed as an upstream problem. Defaults to "no
+   * override", which is what a bare test client wants.
+   */
+  uaOverride?: (slot: UaSlot, region: WorkBuddyRegion) => string | undefined
+  /**
+   * The installed desktop app's identity for one region, for UA expansion.
+   *
+   * Supplied by `index.ts`, which owns the mapping from region to variant and
+   * the process-wide memoisation. Defaults to "nothing installed", so a bare
+   * test client expands from the identity chain exactly as it did before this
+   * seam existed. Async because on Windows the first read may need the
+   * uninstall registry, which is a subprocess.
+   */
+  installedIdentity?: (region: WorkBuddyRegion) => Promise<InstalledAppIdentity>
+}
+
+/** The installed-app values one region contributes to UA expansion. */
+export interface InstalledAppIdentity {
+  appVersion?: string
+  cliVersion?: string
+  productName?: string
 }
 
 /**
@@ -754,6 +823,18 @@ export class WorkBuddyUpstreamClient {
   private readonly resolveAppVersion: () => Promise<AppVersionInfo>
   /** Chat-identity resolver; see {@link WorkBuddyUpstreamClientOptions.resolveChatIdentity}. */
   private readonly resolveChatIdentity: (region: WorkBuddyRegion) => Promise<ChatIdentity>
+  /**
+   * UA-override reader; see {@link WorkBuddyUpstreamClientOptions.uaOverride}.
+   */
+  private readonly uaOverride: (slot: UaSlot, region: WorkBuddyRegion) => string | undefined
+  /**
+   * The installed-app identity for one region.
+   *
+   * Read per request so a UA never goes stale behind a cache the caller
+   * controls; `index.ts` supplies the process-wide memoisation, because only it
+   * knows which variant owns which product.
+   */
+  private readonly installedIdentity: (region: WorkBuddyRegion) => Promise<InstalledAppIdentity>
 
   /** Provenance of the most recent successful catalog fetch, for the card. */
   lastCatalog: WorkBuddyCatalogFetch | undefined
@@ -761,6 +842,85 @@ export class WorkBuddyUpstreamClient {
   constructor(options: WorkBuddyUpstreamClientOptions = {}) {
     this.resolveAppVersion = options.resolveAppVersion ?? (() => resolveAppVersion())
     this.resolveChatIdentity = options.resolveChatIdentity ?? (region => resolveChatIdentity(region))
+    this.uaOverride = options.uaOverride ?? (() => undefined)
+    this.installedIdentity = options.installedIdentity ?? (() => Promise.resolve({}))
+  }
+
+  /** The installed-app values one region contributes, best-effort. */
+  private async installedValues(region: WorkBuddyRegion): Promise<InstalledAppIdentity> {
+    try {
+      return await this.installedIdentity(region)
+    } catch {
+      // A reader that throws must not stop a request: the identity chain below
+      // already knows how to degrade.
+      return {}
+    }
+  }
+
+  /**
+   * The `shared` UA slot: refresh and the CN console read.
+   *
+   * These requests have never carried a desktop identity of their own, so the
+   * default template names no product — but the *version* still comes from the
+   * local install, because that is what the app's own CLI requests do and it is
+   * what keeps this slot from drifting when the app updates.
+   */
+  private async sharedUserAgent(region: WorkBuddyRegion): Promise<string> {
+    const [identity, installed] = await Promise.all([this.identityFor(region), this.installedValues(region)])
+    return resolveUserAgent(
+      this.uaOverride('shared', region),
+      { template: defaultUaTemplate('shared', region), fallback: CLIENT_UA },
+      uaContextOf(region, identity, installed),
+    )
+  }
+
+  /** The `chat` slot for one resolved identity. */
+  private async chatUserAgentFor(identity: ChatIdentity, region: WorkBuddyRegion): Promise<string> {
+    return resolveUserAgent(
+      this.uaOverride('chat', region),
+      { template: defaultUaTemplate('chat', region), fallback: chatUserAgent(identity, region) },
+      uaContextOf(region, identity, await this.installedValues(region)),
+    )
+  }
+
+  /**
+   * The `catalog` slot for one region.
+   *
+   * Every slot is expanded from the *same* context function, so `{appVersion}`
+   * means the same thing wherever a user writes it — and a template using it on
+   * the CN catalog slot is no longer silently reduced to the default.
+   */
+  private async catalogUserAgentFor(region: WorkBuddyRegion, appVersion: AppVersionInfo | undefined): Promise<string> {
+    const identity = await this.identityFor(region)
+    const installed = await this.installedValues(region)
+    const fallback = appVersion === undefined ? CLIENT_UA : appUserAgent(appVersion.version)
+    return resolveUserAgent(
+      this.uaOverride('catalog', region),
+      { template: defaultUaTemplate('catalog', region), fallback },
+      uaContextOf(region, identity, {
+        ...installed,
+        // The catalog path already resolved a version through the legacy chain;
+        // let it lead when the installed reader has nothing.
+        ...installed.appVersion === undefined && appVersion !== undefined
+          ? { appVersion: appVersion.version }
+          : {},
+      }),
+    )
+  }
+
+  /**
+   * Resolve a chat identity, degrading exactly as the chat path does.
+   *
+   * Shared so a UA slot cannot disagree with the chat request about who the
+   * client is: any failure — a thrown resolver included — falls back to the
+   * compiled-in identity rather than propagating.
+   */
+  private async identityFor(region: WorkBuddyRegion): Promise<ChatIdentity> {
+    try {
+      return await this.resolveChatIdentity(region)
+    } catch {
+      return fallbackChatIdentity(region)
+    }
   }
 
   /** POST the chat endpoint; a successful answer is the raw SSE response. */
@@ -777,11 +937,10 @@ export class WorkBuddyUpstreamClient {
     let userAgent: string
     try {
       identity = await this.resolveChatIdentity(region)
-      userAgent = chatUserAgent(identity, region)
     } catch {
       identity = fallbackChatIdentity(region)
-      userAgent = chatUserAgent(identity, region)
     }
+    userAgent = await this.chatUserAgentFor(identity, region)
     let response: Response
     try {
       response = await fetch(`${chatBase(credential)}/v2/chat/completions`, {
@@ -807,7 +966,7 @@ export class WorkBuddyUpstreamClient {
   async refreshToken(credential: WorkBuddyCredential): Promise<WorkBuddyRefreshOutcome> {
     const response = await fetch(`${chatBase(credential)}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
-      headers: refreshHeaders(credential),
+      headers: refreshHeaders(credential, await this.sharedUserAgent(regionOf(credential.domain))),
       signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
     })
     const envelope = await readEnvelope(response)
@@ -837,11 +996,19 @@ export class WorkBuddyUpstreamClient {
    *
    * What distinguishes the two variants here is the User-Agent, not the path:
    * the gateway splits `/v3/config` by client identity, and the split is
-   * load-bearing. A CLI-shaped UA yields the CLI's roster — the chat models
-   * this plugin serves — while an App-shaped UA yields the App's internal
-   * roster. CN keeps the CLI UA it sends for chat, so the catalog it
-   * advertises is exactly the one its own requests can use. The international
-   * variant has no CLI identity, so it keeps the App-shaped UA.
+   * load-bearing. A UA carrying both a `CLI/…` and a `CodeBuddy/…` segment
+   * yields the CLI's roster — the chat models this plugin serves — while any
+   * other recognized `name/version` token yields the App's internal roster
+   * (measured 2026-10-15: 19 models against 24). CN keeps the CLI UA it sends
+   * for chat, so the catalog it advertises is exactly the one its own requests
+   * can use. The international variant has no CLI identity, so it keeps the
+   * App-shaped UA.
+   *
+   * The split is *binary on those two segments*, not on a product name: the
+   * version numbers inside them are not validated, and the `CodeBuddy` segment
+   * must be present or the CLI form answers 400. That is why a half-expanded
+   * CLI template is worse than falling back to the compiled literal — see
+   * `templateResolvesCompletely` in `ua-template.ts`.
    *
    * Membership is the `cli` roster intersected with the usable rows (see
    * {@link parseModelCatalog}); the promo badges the product document does
@@ -865,7 +1032,7 @@ export class WorkBuddyUpstreamClient {
         Origin: originReferer(credential),
         Referer: `${originReferer(credential)}/`,
         ...international ? { 'X-Requested-With': 'XMLHttpRequest', 'X-Product': 'SaaS' } : {},
-        'User-Agent': appVersion === undefined ? CLIENT_UA : appUserAgent(appVersion.version),
+        'User-Agent': await this.catalogUserAgentFor(international ? 'global' : 'cn', appVersion),
       },
       signal: signal === undefined
         ? AbortSignal.timeout(JSON_TIMEOUT_MS)
@@ -921,7 +1088,7 @@ export class WorkBuddyUpstreamClient {
           Accept: 'application/json',
           Origin: originReferer(credential),
           Referer: `${originReferer(credential)}/`,
-          'User-Agent': CLIENT_UA,
+          'User-Agent': await this.sharedUserAgent(regionOf(credential.domain)),
         },
         signal: signal === undefined
           ? AbortSignal.timeout(JSON_TIMEOUT_MS)
@@ -1152,11 +1319,10 @@ export class WorkBuddyUpstreamClient {
     let userAgent: string
     try {
       identity = await this.resolveChatIdentity(international ? 'global' : 'cn')
-      userAgent = chatUserAgent(identity, international ? 'global' : 'cn')
     } catch {
       identity = fallbackChatIdentity(international ? 'global' : 'cn')
-      userAgent = chatUserAgent(identity, international ? 'global' : 'cn')
     }
+    userAgent = await this.chatUserAgentFor(identity, international ? 'global' : 'cn')
     const payload: Record<string, unknown> = {
       model,
       stream: true,

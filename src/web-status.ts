@@ -15,7 +15,7 @@ import { normalizeCredits } from './upstream.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
-import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
+import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebUaSection, WorkBuddyWebVisibilitySection } from './status-paths.ts'
 
 export { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
 export type { WorkBuddyWebStatus } from './status-paths.ts'
@@ -53,6 +53,17 @@ export interface WorkBuddyStatusRouteOptions {
    * no visibility controls rather than a list every such account would share.
    */
   visibility?: () => WorkBuddyWebVisibilitySection | undefined
+  /**
+   * The UA editor's state: each slot's template, its default, and the exact
+   * value the next request would send. Undefined when the caller offers no
+   * editor (tests, headless profiles); the card then renders no editor.
+   *
+   * Async because the preview expands with the identity the wire path would
+   * resolve — reading the installed app is a filesystem probe, and a preview
+   * built from a stale guess would be worse than none. The caller is expected
+   * to degrade rather than reject.
+   */
+  userAgent?: () => Promise<WorkBuddyWebUaSection | undefined> | WorkBuddyWebUaSection | undefined
   /**
    * Route path to mount. Defaults to the CN variant's path so existing callers
    * and tests keep their behaviour; the international variant passes its own.
@@ -173,9 +184,16 @@ export async function workBuddyWebStatus(
   // section's presence.
   const visibility = deps.visibility?.()
   const withVisibility: WorkBuddyWebStatus = visibility === undefined ? withCatalog : { ...withCatalog, visibility }
+  // The UA editor rides beside the model list it changes the shape of: a user
+  // who just edited a template is about to press Refresh, and both controls
+  // belong on the same screen.
+  const userAgent = await deps.userAgent?.()
+  const withUserAgent: WorkBuddyWebStatus = userAgent === undefined
+    ? withVisibility
+    : { ...withVisibility, userAgent }
   const statusWithModels: WorkBuddyWebStatus = modelsField.length > 0
-    ? { ...withVisibility, models: modelsField }
-    : withVisibility
+    ? { ...withUserAgent, models: modelsField }
+    : withUserAgent
   // Probe state rides the signed-in document so the card can render the
   // consent switches and results without a second request. The control key
   // travels with it: this response already passed the loopback guard, and the

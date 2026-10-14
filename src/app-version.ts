@@ -1,13 +1,28 @@
 /**
  * The international desktop app's version, used as the `/v3/config` UA.
  *
- * The App-shaped catalog is served only to a User-Agent carrying the product
- * name (see `docs/workbuddy-ai-international-research-2026-09-11.md` §2.7).
- * That document's conclusion recommended the space form `WorkBuddy AI/<v>`;
- * re-measured on 2026-09-11 the *space* form is rejected (HTTP 400, code
- * 12403) while the terse `WorkBuddyAI/<v>` form — with or without the space
- * removed — returns the 21-model App document. The UA is therefore built from
- * the form verified in code, not from the earlier prose.
+ * The App-shaped catalog is served only to a User-Agent the gateway recognizes
+ * as a client identity (see `docs/workbuddy-ai-international-research-2026-09-11.md`
+ * §2.7). **The reason for the no-space form was re-measured on 2026-10-15 and
+ * the earlier explanation did not survive**: the space form `WorkBuddy AI/5.7.6`
+ * is *not* rejected — it returns the same 24-model App document as every other
+ * recognized form. What the gateway actually enforces is that the UA contains a
+ * recognizable `name/version` token at all; `garbage`, `Mozilla/5.0`, `Foo/1.0`
+ * and an empty string all answer `400 check ua, get coding copilot version error`,
+ * while the prefix and the number are both ignored:
+ *
+ * | UA | result |
+ * |---|---|
+ * | `WorkBuddyAI/5.7.6`, `workbuddy-ai/5.7.6`, `WorkBuddy AI/5.7.6` | 24 models |
+ * | `WorkBuddyAI/` (no version), `WorkBuddyAI/1.0.0`, `WorkBuddyAI/99.99.99` | 24 models |
+ * | `CLI/2.63.2 CodeBuddy/2.63.2` | 19 models (the CLI roster) |
+ *
+ * So `WorkBuddyAI/<v>` is kept because it is what the *app itself* sends
+ * (measured from its own logs, 59 occurrences of
+ * `WorkBuddy/5.7.6 WorkBuddy/5.7.6 CLI/2.156.0` and one of the lowercase form),
+ * not because a space would be refused. Do not "restore" the space on the
+ * strength of the older prose, and do not tighten this into a validation rule
+ * either: the gateway is more permissive than either claim.
  *
  * The version feeds the international catalog UA and the chat identity's
  * `X-IDE-Version`: a missing App, an unreadable plist, or a bad cached value
@@ -26,10 +41,11 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 /**
  * Last-resort UA version.
  *
- * The gateway ignores the version number when splitting the UA (research §2.7.2
- * item 2: `CLI/1.0.0`, `CLI/99.0.0` and the real version all return the same
- * document), so this constant is a shape requirement rather than a currency
- * claim. It is *not* used to infer anything about model capabilities.
+ * The gateway ignores the version number when splitting the UA (re-measured
+ * 2026-10-15: `WorkBuddyAI/1.0.0`, `WorkBuddyAI/99.99.99` and the real version
+ * all return the same document), so this constant is a shape requirement rather
+ * than a currency claim. It is *not* used to infer anything about model
+ * capabilities.
  */
 export const FALLBACK_APP_VERSION = '5.5.2'
 
@@ -154,9 +170,11 @@ export async function resolveAppVersion(options: ResolveAppVersionOptions = {}):
 /**
  * Build the App-shaped User-Agent for catalog requests.
  *
- * `WorkBuddyAI/<version>` with no space is the form measured to reach the App
- * document; the space form is rejected with 400/12403. Throws on an invalid
- * version rather than sending a malformed header.
+ * `WorkBuddyAI/<version>` matches the form the international app itself sends.
+ * The no-space form is a *choice*, not a requirement: the gateway accepts the
+ * space form too (re-measured 2026-10-15 — see the module header), and it
+ * validates only that some `name/version` token is present. Throws on an
+ * invalid version rather than sending a malformed header.
  */
 export function appUserAgent(version: string): string {
   if (!validAppVersion(version)) throw new Error(`invalid WorkBuddy AI version for User-Agent: ${JSON.stringify(version)}`)

@@ -177,6 +177,70 @@ describe('probe control route', () => {
     expect(enabled).toBe(true)
   })
 
+  it('routes a UA template to its slot, and a null template as a clear', async () => {
+    const writes: [string, string | null][] = []
+    const { origin, key } = await mount({
+      setUserAgent: async (slot, template) => {
+        writes.push([slot, template])
+        return { state: 'updated' }
+      },
+    })
+    const headers = { 'X-WorkBuddy-Probe-Key': key }
+    expect((await post(origin, { action: 'set-user-agent', slot: 'chat', template: 'X/{appVersion}' }, headers)).status).toBe(200)
+    expect((await post(origin, { action: 'set-user-agent', slot: 'catalog', template: null }, headers)).status).toBe(200)
+    expect(writes).toEqual([['chat', 'X/{appVersion}'], ['catalog', null]])
+  })
+
+  it('rejects a UA write with no slot, or a non-string template', async () => {
+    // A bare template with no slot has no honest target, so it is refused rather
+    // than guessed at — routing it by default would change a request family the
+    // user never named.
+    const writes: unknown[] = []
+    const { origin, key } = await mount({
+      setUserAgent: async (slot, template) => {
+        writes.push([slot, template])
+        return { state: 'updated' }
+      },
+    })
+    const headers = { 'X-WorkBuddy-Probe-Key': key }
+    expect((await post(origin, { action: 'set-user-agent', template: 'X' }, headers)).status).toBe(400)
+    expect((await post(origin, { action: 'set-user-agent', slot: '', template: 'X' }, headers)).status).toBe(400)
+    expect((await post(origin, { action: 'set-user-agent', slot: 'chat', template: 42 }, headers)).status).toBe(400)
+    expect(writes).toEqual([])
+  })
+
+  it('reports a refused UA template without storing it', async () => {
+    // The handler is the pass-through; the *refusal* is the host callback's, and
+    // this pins that its reason reaches the caller instead of a bare 200.
+    const { origin, key } = await mount({
+      setUserAgent: async () => ({ state: 'failed', reason: 'control characters are not allowed' }),
+    })
+    const result = await post(origin, { action: 'set-user-agent', slot: 'chat', template: 'X' }, { 'X-WorkBuddy-Probe-Key': key })
+    expect(result).toMatchObject({ status: 200, body: { state: 'failed', reason: 'control characters are not allowed' } })
+  })
+
+  it('answers 404 for a UA write on a host that offers no editor', async () => {
+    const { origin, key } = await mount()
+    const result = await post(origin, { action: 'set-user-agent', slot: 'chat', template: 'X' }, { 'X-WorkBuddy-Probe-Key': key })
+    expect(result.status).toBe(404)
+    expect(result.body['error']).toBe('user-agent-setting-not-supported')
+  })
+
+  it('keeps the same guards in front of a UA write', async () => {
+    let wrote = false
+    const { origin, key } = await mount({
+      setUserAgent: async () => {
+        wrote = true
+        return { state: 'updated' }
+      },
+    })
+    const body = { action: 'set-user-agent', slot: 'chat', template: 'X' }
+    expect((await post(origin, body)).status).toBe(403)
+    expect((await postRaw(origin, body, { 'X-WorkBuddy-Probe-Key': key, 'Host': 'attacker.example' })).status).toBe(403)
+    expect((await post(origin, body, { 'X-WorkBuddy-Probe-Key': key, 'Origin': 'https://attacker.example' })).status).toBe(403)
+    expect(wrote).toBe(false)
+  })
+
   it('mints a distinct key per call', () => {
     expect(createProbeKey()).not.toBe(createProbeKey())
   })

@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,13 +9,15 @@ import * as WorkBuddy from '../src/index.ts'
 import { WorkBuddyCredentialStore } from '../src/auth.ts'
 import { fingerprintModel } from '../src/probe-store.ts'
 import { FALLBACK_WORKBUDDY_MODELS } from '../src/catalog.ts'
+import { WORKBUDDY_PROBE_PATH, WORKBUDDY_STATUS_PATH } from '../src/status-paths.ts'
+import { defaultUaTemplate } from '../src/ua-template.ts'
 import { LegacySettingsService } from './helpers/legacy-settings.ts'
 
 /**
  * Catalog lifecycle: what happens across a credential change and a failed fetch.
  *
  * These use the real plugin `apply()` with a stubbed global fetch, because the
- * behaviour under test lives in the wiring rather than in any one module — the
+ * behaviour under test lives in the wiring rather than in any one module 鈥?the
  * credential sweep, the catalog gate, and the retry backoff all have to agree.
  */
 
@@ -74,7 +76,7 @@ function fakeResponse(body: string, ok = true, status = 200): Response {
  * wired by `apply()`, not re-mounted by hand) become callable from a test.
  *
  * The manual-refresh path the reviewer flagged lives inside `apply()`'s route
- * closures, so exercising it needs the actual handlers `apply()` registers —
+ * closures, so exercising it needs the actual handlers `apply()` registers 鈥?
  * which means the `webServer` inject has to fire. This service collects them.
  */
 class FakeWebServer extends Service {
@@ -162,7 +164,7 @@ describe('catalog lifecycle', () => {
     // Wait for the FETCH, not for the roster it feeds. `adoptIdentity` publishes
     // the built-in fallback synchronously and only then starts the fetch
     // (src/index.ts), so "the model list is non-empty" is satisfied a moment
-    // BEFORE any request is issued — waiting on it left `attempts` at 0
+    // BEFORE any request is issued 鈥?waiting on it left `attempts` at 0
     // intermittently. What the assertions below actually require is that a
     // request happened, so wait for exactly that.
     await vi.waitFor(() => {
@@ -173,7 +175,7 @@ describe('catalog lifecycle', () => {
     expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toContain('minimax-m3')
 
     // Without the retry this stayed on the fallback list until a manual
-    // refresh — a startup network blip should not require user action.
+    // refresh 鈥?a startup network blip should not require user action.
     await vi.waitFor(async () => {
       expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['recovered-model'])
     }, { timeout: 10_000 })
@@ -195,8 +197,8 @@ describe('catalog lifecycle', () => {
     })
     const afterFirst = request.mock.calls.length
     // Several sweeps' worth of time at the module's 30s interval would be too
-    // slow to wait for here; instead assert the invariant that matters — a
-    // successful fetch is not repeated for the same identity — by reading the
+    // slow to wait for here; instead assert the invariant that matters 鈥?a
+    // successful fetch is not repeated for the same identity 鈥?by reading the
     // catalog repeatedly, which is what a sweep's early-return guards.
     for (let index = 0; index < 5; index += 1) await ctx.llm.listModels('workbuddy')
     expect(request.mock.calls.length).toBe(afterFirst)
@@ -259,13 +261,13 @@ describe('catalog lifecycle', () => {
 
   /**
    * The reviewer's second finding: after switching to account B, a MANUAL
-   * refresh that fails left account A's catalog serving — under a "live" label,
+   * refresh that fails left account A's catalog serving 鈥?under a "live" label,
    * too, since a failed fetch never marks the source fallback, so even the
    * sweep's retry would not have recovered it.
    *
    * This drives the real refresh route (mounted by apply() into the fake
    * webServer) end to end: A's roster live, A's probe observation recorded,
-   * switch to B, refresh fails → A's models and A's observation must both be
+   * switch to B, refresh fails 鈫?A's models and A's observation must both be
    * gone, fallback serving, source honestly 'fallback' with the error. Then the
    * next refresh succeeds and B's roster lands.
    */
@@ -279,7 +281,7 @@ describe('catalog lifecycle', () => {
 
     // Seed a probe observation belonging to account A. The fingerprint must
     // match the row the LIVE catalog serves (the fetch succeeds first here), so
-    // it is computed over exactly the fields fingerprintModel hashes — the
+    // it is computed over exactly the fields fingerprintModel hashes 鈥?the
     // reasoning shape parseModelCatalog emits for an envelope with no
     // supportsReasoning/onlyReasoning/reasoning keys.
     const liveRowA = {
@@ -369,7 +371,7 @@ describe('catalog lifecycle', () => {
     })
 
     // And back to A: its roster and its recorded levels return without a fresh
-    // detection — the observation survived the round trip through account B.
+    // detection 鈥?the observation survived the round trip through account B.
     await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
     rosterModel = 'acct-a-model'
     const back = await post('/plugins/dsh-workbuddy-connect/probe', key, { action: 'refresh' })
@@ -384,9 +386,9 @@ describe('catalog lifecycle', () => {
 
 /**
  * The saved catalog sits between a live fetch and the built-in roster in the
- * plan's degradation order (§4). Without it a restart always dropped the user
+ * plan's degradation order (搂4). Without it a restart always dropped the user
  * to the compiled-in snapshot, even when a good catalog had been fetched
- * moments earlier — which the plan and the README both promise not to happen.
+ * moments earlier 鈥?which the plan and the README both promise not to happen.
  */
 describe('saved catalog', () => {
   it('restores the last successful catalog for the account on a restart with no network', async () => {
@@ -482,8 +484,8 @@ describe('identity changes during catalog loading', () => {
 
     await vi.waitFor(async () => {
       // One refresh is now two documents since the CN read joined
-      // /v3/config — the config call plus the best-effort console badge
-      // read — so account B's refresh lands on calls 2 and 3 after account
+      // /v3/config 鈥?the config call plus the best-effort console badge
+      // read 鈥?so account B's refresh lands on calls 2 and 3 after account
       // A's aborted call 1. The exact total is an implementation detail of
       // how many documents a refresh needs; only the abort invariant is pinned.
       expect(calls).toBeGreaterThanOrEqual(3)
@@ -523,5 +525,289 @@ describe('identity changes during catalog loading', () => {
     const saved = JSON.parse(await readFile(join(root, '.workbuddy-catalog.json'), 'utf8')) as { entries: Record<string, unknown> }
     expect(saved.entries['uid-a:ent-1']).toBeUndefined()
     expect(saved.entries['uid-b:ent-1']).toBeDefined()
+  }, 45_000)
+})
+
+/**
+ * The User-Agent editor, end to end through the real `apply()` wiring.
+ *
+ * The unit suites pin the template rules and the card's rendering; what neither
+ * can prove is the loop that matters to a user 鈥?the card writes a template
+ * through the control route, and the *next catalog request* is the one that
+ * actually carries it. That loop lives entirely inside `apply()`'s closures, so
+ * it is exercised here with the real routes and a stubbed fetch.
+ */
+describe('user-agent overrides through the real wiring', () => {
+  /**
+   * Talk to the test's own loopback server over `node:http`, not `fetch`.
+   *
+   * `fetch` is globally stubbed in this suite to stand in for the *upstream*,
+   * so routing the card's own calls through it would send them into the stub.
+   */
+  function loopback(port: number, path: string, init: { method?: string, body?: string, headers?: Record<string, string> } = {}): Promise<{ status: number, body: Record<string, unknown> }> {
+    return new Promise((resolve, reject) => {
+      const payload = init.body === undefined ? undefined : Buffer.from(init.body, 'utf8')
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path,
+        method: init.method ?? 'GET',
+        headers: {
+          accept: 'application/json',
+          ...payload === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': String(payload.length) },
+          ...init.headers,
+        },
+      }, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          let parsed: Record<string, unknown> = {}
+          try { parsed = JSON.parse(text) as Record<string, unknown> } catch { parsed = { raw: text } }
+          resolve({ status: res.statusCode ?? 0, body: parsed })
+        })
+      })
+      request.on('error', reject)
+      request.end(payload)
+    })
+  }
+
+  /** POST one control action to a variant's probe route. */
+  async function postAction(
+    port: number,
+    path: string,
+    key: string,
+    action: Record<string, unknown>,
+  ): Promise<{ status: number, body: Record<string, unknown> }> {
+    return await loopback(port, path, {
+      method: 'POST',
+      headers: { 'X-WorkBuddy-Probe-Key': key },
+      body: JSON.stringify(action),
+    })
+  }
+
+  /** Read one variant's status document. */
+  async function readStatus(port: number, path: string): Promise<Record<string, unknown>> {
+    return (await loopback(port, path)).body
+  }
+
+  /** Every `User-Agent` seen on a request to one URL fragment. */
+  function userAgentsFor(request: ReturnType<typeof vi.fn>, fragment: string): string[] {
+    return request.mock.calls
+      .filter(call => String(call[0] as string).includes(fragment))
+      .map(call => (call[1] as RequestInit | undefined)?.headers as Record<string, string> | undefined)
+      .map(headers => headers?.['User-Agent'] ?? '')
+  }
+
+  it('stores a template, reports it, and sends it on the next catalog request', async () => {
+    const root = await tempDir()
+    const cnFile = join(root, 'cn.info')
+    await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
+    vi.stubEnv('DSH_HOME', root)
+    vi.stubEnv('WORKBUDDY_AUTH_FILE', cnFile)
+    vi.stubEnv('WORKBUDDY_AI_AUTH_FILE', join(root, 'absent.info'))
+
+    const request = vi.fn(async () => fakeResponse(catalogEnvelope('live-model', 'Live')))
+    vi.stubGlobal('fetch', request)
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['live-model'])
+    })
+    // Baseline: an untouched install sends the CLI-form UA, with the versions
+    // expanded from the *installed app* when this machine has one. That is the
+    // point of the feature, so the assertion accepts either the local versions
+    // or the compiled-in literal — what it pins is the SHAPE, which must be the
+    // CLI form the CN endpoint serves its `cli` roster to.
+    expect(userAgentsFor(request, '/v3/config').at(-1)).toMatch(/^CLI\/[\d.]+ CodeBuddy\/[\d.]+$/u)
+
+    const routes = FakeWebServer.current!.routes
+    const { port } = await serve(routes)
+    const statusBefore = await readStatus(port, WORKBUDDY_STATUS_PATH)
+    const key = String(statusBefore['probeKey'])
+    // The editor rides the document with the slot list the card renders, and it
+    // reports the *template*, not the expansion: that is what the field edits.
+    const section = statusBefore['userAgent'] as { slots: { slot: string, template: string, preview: string }[] }
+    expect(section.slots.map(slot => slot.slot)).toEqual(['catalog', 'chat', 'shared'])
+    expect(section.slots[0]!.template).toBe(defaultUaTemplate('catalog', 'cn'))
+
+    // The write, through the real route and the real store.
+    const write = await postAction(port, WORKBUDDY_PROBE_PATH, key, {
+      action: 'set-user-agent',
+      slot: 'catalog',
+      template: 'Edited/{appVersion}',
+    })
+    expect(write).toMatchObject({ status: 200, body: { state: 'updated' } })
+
+    // The document now reports it as overridden, with the preview agreeing.
+    const statusAfter = await readStatus(port, WORKBUDDY_STATUS_PATH)
+    const after = statusAfter['userAgent'] as { slots: { slot: string, template: string, overridden: boolean, preview: string }[] }
+    const catalogSlot = after.slots.find(slot => slot.slot === 'catalog')!
+    expect(catalogSlot.overridden).toBe(true)
+    expect(catalogSlot.template).toBe('Edited/{appVersion}')
+
+    // THE POINT: the next actual catalog request carries the edited UA, without
+    // a restart 鈥?the store is read per request, not captured at construction.
+    const before = userAgentsFor(request, '/v3/config').length
+    await postAction(port, WORKBUDDY_PROBE_PATH, key, { action: 'refresh' })
+    await vi.waitFor(() => { expect(userAgentsFor(request, '/v3/config').length).toBeGreaterThan(before) })
+    const sent = userAgentsFor(request, '/v3/config').at(-1)!
+    expect(sent).toMatch(/^Edited\/\d/u)
+    // The preview the card rendered was exactly what went out — which is the
+    // whole reason a preview is worth showing at all.
+    const previewSection = (await readStatus(port, WORKBUDDY_STATUS_PATH))['userAgent'] as { slots: { slot: string, preview: string }[] }
+    expect(sent).toBe(previewSection.slots.find(slot => slot.slot === 'catalog')!.preview)
+  }, 45_000)
+
+  it('reports a default it could not fill, instead of a silently shortened UA', async () => {
+    // The card must be able to explain a preview that differs from the template
+    // in the field. Measurement makes this worth reporting rather than hiding:
+    // on the CN catalog endpoint a half-expanded default is not benign —
+    // `CodeBuddy/<v>` without its `CLI/…` segment answers HTTP 200 with a
+    // document carrying no `cli` roster at all.
+    const root = await tempDir()
+    const cnFile = join(root, 'cn.info')
+    await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
+    vi.stubEnv('DSH_HOME', root)
+    vi.stubEnv('WORKBUDDY_AUTH_FILE', cnFile)
+    vi.stubEnv('WORKBUDDY_AI_AUTH_FILE', join(root, 'absent.info'))
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(catalogEnvelope('live-model', 'Live'))))
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['live-model'])
+    })
+    const { port } = await serve(FakeWebServer.current!.routes)
+    const section = (await readStatus(port, WORKBUDDY_STATUS_PATH))['userAgent'] as {
+      slots: { slot: string, preview: string, overridden: boolean, missingCliVersion?: true, defaultUnavailable?: true }[]
+    }
+
+    // The two notes are mutually exclusive by construction: a default falls back
+    // as a whole, an override drops the token. Asserting the exclusivity is the
+    // point — it is what keeps the card from describing both behaviours at once.
+    for (const slot of section.slots) {
+      expect(slot.missingCliVersion === true && slot.defaultUnavailable === true).toBe(false)
+      if (slot.defaultUnavailable === true) {
+        expect(slot.overridden).toBe(false)
+        // The preview is the compiled literal, not a shortened template.
+        expect(slot.preview).toMatch(/^(?:CLI\/[\d.]+ CodeBuddy\/[\d.]+|WorkBuddyAI\/[\d.]+)$/u)
+      }
+    }
+
+    // A slot whose default CAN be filled must not carry the note, or the card
+    // would warn about a fallback that is not happening.
+    for (const slot of section.slots) {
+      if (slot.preview.startsWith('CLI/') && slot.preview.includes('CodeBuddy/')) {
+        expect(slot.defaultUnavailable).toBeUndefined()
+      }
+    }
+  }, 45_000)
+
+  it('refuses an unusable template, and keeps sending the default', async () => {
+    const root = await tempDir()
+    const cnFile = join(root, 'cn.info')
+    await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
+    vi.stubEnv('DSH_HOME', root)
+    vi.stubEnv('WORKBUDDY_AUTH_FILE', cnFile)
+    vi.stubEnv('WORKBUDDY_AI_AUTH_FILE', join(root, 'absent.info'))
+
+    const request = vi.fn(async () => fakeResponse(catalogEnvelope('live-model', 'Live')))
+    vi.stubGlobal('fetch', request)
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['live-model'])
+    })
+    const { port } = await serve(FakeWebServer.current!.routes)
+    const key = String((await readStatus(port, WORKBUDDY_STATUS_PATH))['probeKey'])
+
+    // A CR/LF would split the HTTP request, so it must never be stored.
+    const bad = await postAction(port, WORKBUDDY_PROBE_PATH, key, {
+      action: 'set-user-agent',
+      slot: 'catalog',
+      template: 'Evil\r\nX-Injected: 1',
+    })
+    expect(bad.body['state']).toBe('failed')
+    expect(String(bad.body['reason'])).toContain('control characters')
+
+    // An unknown placeholder would reach the wire looking like syntax the
+    // gateway might act on, so it is refused too.
+    const unknown = await postAction(port, WORKBUDDY_PROBE_PATH, key, {
+      action: 'set-user-agent',
+      slot: 'chat',
+      template: 'X/{inject}',
+    })
+    expect(unknown.body['state']).toBe('failed')
+    expect(String(unknown.body['reason'])).toContain('placeholder')
+
+    // Nothing was stored, so the next request still sends the default.
+    const status = await readStatus(port, WORKBUDDY_STATUS_PATH)
+    const slots = (status['userAgent'] as { slots: { slot: string, overridden: boolean }[] }).slots
+    expect(slots.every(slot => !slot.overridden)).toBe(true)
+
+    const before = userAgentsFor(request, '/v3/config').length
+    await postAction(port, WORKBUDDY_PROBE_PATH, key, { action: 'refresh' })
+    await vi.waitFor(() => { expect(userAgentsFor(request, '/v3/config').length).toBeGreaterThan(before) })
+    // Still the untouched CLI-form default — a refused write changes nothing.
+    expect(userAgentsFor(request, '/v3/config').at(-1)).toMatch(/^CLI\/[\d.]+ CodeBuddy\/[\d.]+$/u)
+  }, 45_000)
+
+  it('resets a slot back to the shipped default', async () => {
+    const root = await tempDir()
+    const cnFile = join(root, 'cn.info')
+    await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
+    vi.stubEnv('DSH_HOME', root)
+    vi.stubEnv('WORKBUDDY_AUTH_FILE', cnFile)
+    vi.stubEnv('WORKBUDDY_AI_AUTH_FILE', join(root, 'absent.info'))
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(catalogEnvelope('live-model', 'Live'))))
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['live-model'])
+    })
+    const { port } = await serve(FakeWebServer.current!.routes)
+    const key = String((await readStatus(port, WORKBUDDY_STATUS_PATH))['probeKey'])
+
+    await postAction(port, WORKBUDDY_PROBE_PATH, key, {
+      action: 'set-user-agent', slot: 'chat', template: 'Edited/{appVersion}',
+    })
+    // Reset with an explicit null.
+    const reset = await postAction(port, WORKBUDDY_PROBE_PATH, key, {
+      action: 'set-user-agent', slot: 'chat', template: null,
+    })
+    expect(reset).toMatchObject({ status: 200, body: { state: 'updated' } })
+
+    const status = await readStatus(port, WORKBUDDY_STATUS_PATH)
+    const chat = (status['userAgent'] as { slots: { slot: string, overridden: boolean, template: string }[] })
+      .slots.find(slot => slot.slot === 'chat')!
+    expect(chat.overridden).toBe(false)
+    expect(chat.template).toBe(defaultUaTemplate('chat', 'cn'))
+  }, 45_000)
+
+  it('per-request reads mean an override saved before the app was readable still applies', async () => {
+    // The store is read inside `fetchModels`, not captured when the client was
+    // constructed: this pins that a template written by a *separate* store
+    // handle (the card's) affects requests issued by the already-built client.
+    const root = await tempDir()
+    const cnFile = join(root, 'cn.info')
+    await writeFile(cnFile, credentialDocument('copilot.tencent.com', 'uid-a'))
+    vi.stubEnv('DSH_HOME', root)
+    vi.stubEnv('WORKBUDDY_AUTH_FILE', cnFile)
+    vi.stubEnv('WORKBUDDY_AI_AUTH_FILE', join(root, 'absent.info'))
+
+    // Pre-seed the file on disk, before the plugin ever builds its client.
+    await writeFile(join(root, '.workbuddy-user-agent.json'), JSON.stringify({
+      version: 1,
+      variants: { workbuddy: { catalog: 'Preseeded/{appVersion}' } },
+    }))
+
+    const request = vi.fn(async () => fakeResponse(catalogEnvelope('live-model', 'Live')))
+    vi.stubGlobal('fetch', request)
+
+    const ctx = await boot()
+    await vi.waitFor(async () => {
+      expect((await ctx.llm.listModels('workbuddy')).map(model => model.id)).toEqual(['live-model'])
+    })
+    expect(userAgentsFor(request, '/v3/config').at(-1)).toMatch(/^Preseeded\//u)
   }, 45_000)
 })

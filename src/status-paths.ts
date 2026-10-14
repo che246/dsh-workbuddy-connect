@@ -34,8 +34,60 @@ export const WORKBUDDY_AI_PROBE_PATH = '/plugins/dsh-workbuddy-connect/ai/probe'
  */
 export const WORKBUDDY_UPDATE_PATH = '/plugins/dsh-workbuddy-connect/update'
 
-/** One model's recorded probe observation, as the card displays it. */
-export interface WorkBuddyWebProbeModel {
+/**
+ * One UA slot's state, as the card's editor renders it.
+ *
+ * `preview` is the exact header value the next request on this slot would send,
+ * produced by the host through the same function the wire path uses — so a
+ * preview can never disagree with what actually goes out. The template is shown
+ * with its placeholders unexpanded, because that is what the user edits.
+ */
+export interface WorkBuddyWebUaSlot {
+  /** `catalog` | `chat` | `shared`. */
+  slot: string
+  /** The template in effect, placeholders and all. */
+  template: string
+  /** The template this plugin ships with for this slot, for the Reset action. */
+  defaultTemplate: string
+  /** Whether `template` is a stored override rather than the shipped default. */
+  overridden: boolean
+  /** What the next request on this slot sends, after expansion. */
+  preview: string
+  /** Why a stored template was refused, when it was; the wire keeps the default. */
+  error?: string
+  /**
+   * The template names `{cliVersion}` but no CLI version could be read from the
+   * installed app, so that token is being dropped.
+   *
+   * Only ever set for a *stored override*. A note rather than an error:
+   * dropping the token is the official client's own behaviour for a missing
+   * extension, and it is what lets a user write a template that tolerates an
+   * unreadable CLI version. The card says so because an unexplained missing
+   * segment reads as a bug in the template.
+   */
+  missingCliVersion?: true
+  /**
+   * The shipped default needs a value this machine could not supply, so the
+   * compiled-in literal is being sent instead of a half-expanded template.
+   *
+   * Only ever set for an un-overridden slot, and mutually exclusive with
+   * `missingCliVersion`: the default falls back *as a whole* rather than
+   * dropping a token, because measurement shows the short forms are not benign
+   * (see `templateResolvesCompletely`). Reported so the preview — which visibly
+   * differs from the template in the field — does not read as a bug.
+   */
+  defaultUnavailable?: true
+}
+
+/** The UA editor's whole section. */
+export interface WorkBuddyWebUaSection {
+  /** Every slot, in the order the card lists them. */
+  slots: readonly WorkBuddyWebUaSlot[]
+  /** Placeholders the editor may insert, so the card never hardcodes the list. */
+  placeholders: readonly string[]
+}
+
+/** One model's recorded probe observation, as the card displays it. */export interface WorkBuddyWebProbeModel {
   id: string
   name: string
   /** `validating` results carry efforts; the other states never do. */
@@ -63,12 +115,12 @@ export interface WorkBuddyProbeAction {
    * `refresh` re-reads the credential and re-fetches the model catalog;
    * `set-maximum-context-window` persists the international card preference;
    * `set-model-visibility` hides or shows one model for the signed-in
-   * account's picker.
+   * account's picker; `set-user-agent` stores or clears one UA override.
    *
-   * All five are writes, which is why they share this route's in-process key
+   * All six are writes, which is why they share this route's in-process key
    * and loopback guards rather than the read-only status GET.
    */
-  action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'set-model-visibility'
+  action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'set-model-visibility' | 'set-user-agent'
   /** Target model id; required for `probe` and `set-model-visibility`. */
   model?: string
   /** Requested value for `set-maximum-context-window` and `set-model-visibility`. */
@@ -82,6 +134,20 @@ export interface WorkBuddyProbeAction {
    * account's toggle in another account's bucket.
    */
   account?: string
+  /**
+   * Which UA slot `set-user-agent` edits: `catalog` (the model-list request),
+   * `chat` (chat and the reasoning probe), or `shared` (token refresh and the
+   * CN console read).
+   */
+  slot?: string
+  /**
+   * The template to store, or `null` to clear the slot back to the default.
+   *
+   * A template, not a finished header: `{appVersion}`, `{cliVersion}`, and
+   * `{product}` stay symbolic so the plugin keeps supplying the values it reads
+   * from the installed app instead of freezing today's version into a file.
+   */
+  template?: string | null
 }
 
 /**
@@ -293,6 +359,14 @@ export type WorkBuddyWebStatus =
     useMaximumContextWindow?: boolean
     /** Per-account hidden-model state for the card's visibility controls. */
     visibility?: WorkBuddyWebVisibilitySection
+    /**
+     * The UA editor's state.
+     *
+     * Present on every host that reached this code, so its absence is a signal
+     * about the *document* (an older host, or a test that omits the getter)
+     * rather than about the user — the card then renders no editor.
+     */
+    userAgent?: WorkBuddyWebUaSection
     /**
      * In-process key authorizing probe control writes. Handed to the card with
      * the status document (the card is same-origin and already had to pass the

@@ -52,10 +52,17 @@ describe('validAppVersion', () => {
 })
 
 describe('appUserAgent', () => {
-  it('builds the form measured to reach the App catalog document', () => {
-    // `WorkBuddyAI/5.5.2` returned 200 with the 21-model App document on
-    // 2026-09-11; the space form `WorkBuddy AI/5.5.2` returned 400/12403.
-    // This pin exists so nobody "restores" the space from the older prose.
+  it('builds the form the international app itself sends', () => {
+    // `WorkBuddyAI/5.5.2` returned 200 with the App document on 2026-09-11.
+    //
+    // Re-measured 2026-10-15: the *space* form `WorkBuddy AI/5.7.6` is NOT
+    // rejected — it returns the same 24-model document. The gateway validates
+    // only that a recognizable `name/version` token is present, and ignores the
+    // number (`WorkBuddyAI/1.0.0` and `WorkBuddyAI/99.99.99` both answer 200).
+    // This pin therefore exists to keep the *app's own* spelling, which is what
+    // the international client puts on the wire — not to avoid a 400 that does
+    // not happen. Do not "restore" the space from the older prose, and do not
+    // tighten this into a validation rule either.
     expect(appUserAgent('5.5.2')).toBe('WorkBuddyAI/5.5.2')
     expect(appUserAgent('5.5.2')).not.toContain(' ')
   })

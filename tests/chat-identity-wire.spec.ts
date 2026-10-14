@@ -154,13 +154,26 @@ describe('probeEffort identity', () => {
 })
 
 describe('unchanged paths (regression pin)', () => {
+  /**
+   * The shape these three paths keep: a CLI-form UA whose versions come from
+   * the *installed app*, and no chat-only attribution headers. The values are
+   * injected rather than read from the machine, so the pin is about the shape.
+   */
+  const INSTALLED = { appVersion: '5.5.4', cliVersion: '2.137.1', productName: 'WorkBuddy' }
+  function installedClient(): WorkBuddyUpstreamClient {
+    return new WorkBuddyUpstreamClient({
+      resolveChatIdentity: async () => IDENTITY,
+      installedIdentity: async () => INSTALLED,
+    })
+  }
+
   it('refresh keeps the CLI-form UA, the workbuddy source, and the shared family', async () => {
     const wire = captureFetch(JSON.stringify({ code: 0, msg: 'ok', data: { accessToken: 'next' } }))
-    await client().refreshToken(CN)
+    await installedClient().refreshToken(CN)
     const [url, init] = wire.last()
     expect(url).toBe('https://copilot.tencent.com/v2/plugin/auth/token/refresh')
     const headers = init.headers as Record<string, string>
-    expect(headers['User-Agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
+    expect(headers['User-Agent']).toBe('CLI/2.137.1 CodeBuddy/5.5.4')
     expect(headers['X-Auth-Refresh-Source']).toBe('workbuddy')
     expect(headers['X-Refresh-Token']).toBe('rt')
     expect(headers['Origin']).toBe('https://www.codebuddy.cn')
@@ -174,11 +187,11 @@ describe('unchanged paths (regression pin)', () => {
       code: 0, msg: 'ok',
       data: { models: [{ id: 'm', name: 'M', maxInputTokens: 100, maxOutputTokens: 10 }], agents: [{ name: 'cli', models: ['m'] }] },
     }))
-    await client().fetchModels(CN)
+    await installedClient().fetchModels(CN)
     const [url, init] = wire.last()
     expect(url).toBe('https://copilot.tencent.com/console/enterprises/personal/models')
     const headers = init.headers as Record<string, string>
-    expect(headers['User-Agent']).toBe('CLI/2.63.2 CodeBuddy/2.63.2')
+    expect(headers['User-Agent']).toBe('CLI/2.137.1 CodeBuddy/5.5.4')
     expect(headers['X-IDE-Type']).toBeUndefined()
     expect(headers['X-IDE-Name']).toBeUndefined()
     expect(headers['X-IDE-Version']).toBeUndefined()
@@ -192,12 +205,15 @@ describe('unchanged paths (regression pin)', () => {
     const intlClient = new WorkBuddyUpstreamClient({
       resolveAppVersion: async () => ({ version: '5.5.2', source: 'installed', bundle: '/x' }),
       resolveChatIdentity: async () => IDENTITY,
+      installedIdentity: async () => ({ appVersion: '5.7.6', cliVersion: '2.156.0', productName: 'WorkBuddy AI' }),
     })
     await intlClient.fetchModels(GLOBAL)
     const [url, init] = wire.last()
     expect(url).toBe('https://www.workbuddy.ai/v3/config')
     const headers = init.headers as Record<string, string>
-    expect(headers['User-Agent']).toBe('WorkBuddyAI/5.5.2')
+    // The installed app's version wins over the legacy resolver's.
+    expect(headers['User-Agent']).toBe('WorkBuddyAI/5.7.6')
+    expect(headers['User-Agent']).not.toContain(' ')
     expect(headers['X-IDE-Type']).toBeUndefined()
     expect(headers['X-IDE-Name']).toBeUndefined()
     expect(headers['X-IDE-Version']).toBeUndefined()

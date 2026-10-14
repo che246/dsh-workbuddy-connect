@@ -362,7 +362,15 @@ export function atRestKeyProviderFor(variant: Pick<WorkBuddyVariant, 'id' | 'ele
 /** Absolute tool paths: never resolved through PATH, which a user can change. */
 const MDFIND_BIN = '/usr/bin/mdfind'
 const PLUTIL_BIN = '/usr/bin/plutil'
-const WINDOWS_REGISTRY_ROOTS = [
+/**
+ * The uninstall roots this module reads, in probe order.
+ *
+ * Exported because `app-install.ts` reads the *same* records for a different
+ * question — `DisplayVersion` rather than `DisplayIcon` — and two copies of
+ * this list would be one Windows release away from disagreeing about where a
+ * product is recorded.
+ */
+export const WINDOWS_REGISTRY_ROOTS = [
   'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
   'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
   'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
@@ -447,8 +455,8 @@ const WINDOWS_POWERSHELL_QUERY_SCRIPT = [
   '$out=@();',
   'foreach ($n in $k.GetSubKeyNames()) {',
   '  try { $p=$k.OpenSubKey($n); if ($null -eq $p) { throw "null" } } catch { [Console]::Error.Write("subkey unreadable"); exit 3 };',
-  '  $d=$p.GetValue("DisplayName");$i=$p.GetValue("DisplayIcon");',
-  '  if ($null -ne $d -or $null -ne $i) { $out += [pscustomobject]@{ displayName=[string]$d; displayIcon=[string]$i } }',
+  '  $d=$p.GetValue("DisplayName");$i=$p.GetValue("DisplayIcon");$v=$p.GetValue("DisplayVersion");',
+  '  if ($null -ne $d -or $null -ne $i) { $out += [pscustomobject]@{ displayName=[string]$d; displayIcon=[string]$i; displayVersion=[string]$v } }',
   '};',
   'ConvertTo-Json -InputObject @($out) -Compress -Depth 3',
 ].join(' ')
@@ -995,6 +1003,9 @@ function isAsciiOnly(bytes: Buffer): boolean {
  * is a string. Records carrying neither value are skipped, and the key name is
  * synthetic because only the values are read.
  *
+ * `displayVersion` rides along for the version reader in `app-install.ts`,
+ * which reuses this same document shape rather than transcribing it again.
+ *
  * @param output - the child's UTF-8 stdout.
  * @returns the document, or `undefined` when it was not the expected JSON.
  */
@@ -1013,10 +1024,14 @@ function parseWindowsUninstallJson(output: string): string | undefined {
     const record = row as Record<string, unknown>
     const displayName = record['displayName']
     const displayIcon = record['displayIcon']
+    const displayVersion = record['displayVersion']
     if (typeof displayName !== 'string' && typeof displayIcon !== 'string') continue
     lines.push(`HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{PS-${String(index)}}`)
     if (typeof displayName === 'string') lines.push(`    DisplayName    REG_SZ    ${displayName}`)
     if (typeof displayIcon === 'string') lines.push(`    DisplayIcon    REG_SZ    ${displayIcon}`)
+    if (typeof displayVersion === 'string' && displayVersion !== '') {
+      lines.push(`    DisplayVersion    REG_SZ    ${displayVersion}`)
+    }
   }
   return lines.join('\r\n')
 }
@@ -1438,15 +1453,36 @@ function windowsRegistryKeyMissing(stderr: string): boolean {
 }
 
 /**
+ * The uninstall-record fields this module reads.
+ *
+ * `DisplayVersion` is not used by credential discovery — that path only needs
+ * a binary to execute — but the version reader in `app-install.ts` reuses this
+ * exact parser so both agree on what a `reg query` document looks like. One
+ * parser, not two: a second transcription of the format is one Windows
+ * release away from disagreeing with the first.
+ */
+const WINDOWS_REGISTRY_VALUE_FIELDS = 'DisplayName|DisplayIcon|DisplayVersion'
+
+/**
  * Parse the value columns emitted by `reg query ... /s`.
  *
  * Entries are filtered by the product's DisplayName pattern *before* the
  * DisplayIcon is judged, so another product's records — however broken — are
  * excluded as decisively not ours and can never mark this product's search
  * incomplete.
+ *
+ * A matching entry whose `DisplayVersion` does not parse as a version is
+ * reported through `versions`, not through `incomplete`: "the record is there
+ * but Windows recorded no usable version" is a *decidable* answer about the
+ * version (it is unknown), unlike an unreadable root, which is not decidable
+ * about anything. Callers needing the version therefore check for its absence
+ * rather than for a failure.
  */
-function parseWindowsRegistryOutput(output: string, displayNamePattern: RegExp): { candidates: string[], incomplete: boolean } {
-  const entries = new Map<string, { displayName?: string, displayIcon?: string }>()
+export function parseWindowsRegistryOutput(
+  output: string,
+  displayNamePattern: RegExp,
+): { candidates: string[], incomplete: boolean, versions: Map<string, string> } {
+  const entries = new Map<string, { displayName?: string, displayIcon?: string, displayVersion?: string }>()
   let currentKey: string | undefined
   for (const line of output.split(/\r?\n/u)) {
     const keyMatch = /^\s*(HKEY_[^\r\n]+?)\s*$/iu.exec(line)
@@ -1456,29 +1492,41 @@ function parseWindowsRegistryOutput(output: string, displayNamePattern: RegExp):
       continue
     }
     if (currentKey === undefined) continue
-    const valueMatch = /^\s+(DisplayName|DisplayIcon)\s+REG_[A-Z0-9_]+\s*(.*?)\s*$/iu.exec(line)
+    const valueMatch = new RegExp(`^\\s+(${WINDOWS_REGISTRY_VALUE_FIELDS})\\s+REG_[A-Z0-9_]+\\s*(.*?)\\s*$`, 'iu').exec(line)
     if (valueMatch === null) continue
     const entry = entries.get(currentKey)
     if (entry === undefined) continue
     const value = valueMatch[2] ?? ''
-    if (valueMatch[1]!.toLowerCase() === 'displayname') entry.displayName = value
-    else entry.displayIcon = value
+    const field = valueMatch[1]!.toLowerCase()
+    if (field === 'displayname') entry.displayName = value
+    else if (field === 'displayicon') entry.displayIcon = value
+    else entry.displayVersion = value
   }
   const candidates: string[] = []
+  const versions = new Map<string, string>()
   let incomplete = false
   for (const entry of entries.values()) {
     if (entry.displayName === undefined) continue
     if (!displayNamePattern.test(entry.displayName.trim())) continue
     const displayIcon = entry.displayIcon === undefined ? undefined : parseWindowsDisplayIcon(entry.displayIcon)
+    // Unchanged from before the version field was added: an entry matching the
+    // product name whose icon cannot be read is a candidate we could not check,
+    // which is `incomplete` — never a silent drop.
     if (displayIcon === undefined) incomplete = true
     else candidates.push(displayIcon)
+    // The version is keyed by the icon path so it can be joined to the
+    // candidate the caller already has; a record without an icon keys it by
+    // name instead, because the version reader does not need an exe at all.
+    const version = entry.displayVersion?.trim()
+    if (version !== undefined && version !== '' && WINDOWS_ELECTRON_VERSION_PATTERN.test(version)) {
+      versions.set(displayIcon === undefined ? `name:${entry.displayName.trim()}` : displayIcon.toLowerCase(), version)
+    }
   }
-  return { candidates, incomplete }
+  return { candidates, incomplete, versions }
 }
 
 /** Read a quoted DisplayIcon path and remove the Windows icon-index suffix. */
-function parseWindowsDisplayIcon(value: string): string | undefined {
-  const raw = value.trim()
+function parseWindowsDisplayIcon(value: string): string | undefined {  const raw = value.trim()
   let path: string
   if (raw.startsWith('"')) {
     const closingQuote = raw.indexOf('"', 1)

@@ -76,13 +76,31 @@ dsh --profile dsh-tui
 
 - **企业账号积分**：国内版企业账号（`enterpriseId` 非空）走企业计费接口读取周期额度，卡片显示「企业额度」与周期重置时间。
 
+- **User-Agent 自定义**：卡片的「User-Agent」标签里可以改插件发请求时使用的 UA。之所以开放这个口子——WorkBuddy 是**按 UA 分流**决定返回哪份模型列表的（详见「已知限制」），上游一旦调整这个约定，插件默认值就会失效；把它做成可编辑，出问题时用户能自己改回来，不必等插件发版。
+
+  分三个槽位，对应三类请求，各自独立保存、互不影响：
+
+  | 槽位 | 用于 | 默认值 |
+  |---|---|---|
+  | 模型列表 | 拉取模型列表 `/v3/config` | 国内版 `CLI/{cliVersion} CodeBuddy/{appVersion}`；国际版 `WorkBuddyAI/{appVersion}` |
+  | 对话 | 对话消息与推理档位检测 | `WorkBuddy/{appVersion} {product}/{appVersion} CLI/{cliVersion}` |
+  | 登录与续期 | 令牌续期、优惠/徽章查询 | `CLI/{cliVersion} CodeBuddy/{appVersion}` |
+
+  模板里可用的占位符：`{appVersion}`（本机 App 版本）、`{cliVersion}`（App 内置 CLI 版本）、`{product}`（产品名，国内版 `WorkBuddy`、国际版 `WorkBuddy AI`）。**取不到值的片段会整体省略**——比如没读到 CLI 版本时 `CLI/{cliVersion}` 整段消失，而不是留下一个空的 `CLI/`。
+
+  **默认值里的版本取自本机安装的 App**，不是写死在插件里的常量：插件读 `<安装目录>/resources/app.asar.unpacked/cli/product.json` 的 `genieVersion`（App 自己的版本声明）和同目录 `package.json` 的 CLI 版本，安装目录在 Windows 上从卸载记录的 `DisplayIcon` 取得——所以 App 装在非默认位置也能找到。读到的值会缓存到 `$DSH_HOME/.workbuddy-installed-version.json`，下次即便 App 被移动或卸载也仍按原版本标识自己。上游不校验 App 形态 UA 里的版本号（实测 `WorkBuddyAI/1.0.0` 与 `WorkBuddyAI/99.99.99` 返回同一份目录），所以版本漂移是标识问题而非功能问题；但**读不到本机版本时，默认模板会整体退回编译常量，而不是发出半截模板**——国内版实测 `CodeBuddy/5.5.4`（缺 `CLI/` 段）会返回 HTTP 200 但**没有 `cli` 名单**，`CLI/2.137.1`（缺 `CodeBuddy/` 段）直接 400，两种都不可接受。
+
+  每个槽位下方实时显示「将发送」的展开结果，由宿主用**和真实请求完全相同的函数**算出来，所以预览与实际发出的值一定一致；旁边还有「恢复默认」一键还原。改动只在**点保存后**才写入文件、并且从**下一个请求**开始生效，不需要重启 DSH。卡片上的「刷新」会重新读取本机 App 版本（App 升级后按它即可让 UA 跟上），其余请求路径只读缓存值，不会为读版本去等一次注册表查询。
+
+  校验规则：空模板、超长、含换行/控制字符、含未知占位符一律**拒绝保存**并给出原因（换行会让 HTTP 请求被截断分裂）；被拒绝的模板不会写入文件，实际仍按默认值发送。校验只针对用户自己写的模板；默认模板取不到值时走上面的整段退回规则。
+
 - **费率比例**：每个模型名后直接显示积分倍率（如 `GLM-5.2 · x0.79`、`Hy3 · x0.00`），`/model` 弹窗与输入框的模型下拉都能看到；倍率仅用于显示，不影响实际请求。
 
 - **徽章展示**：促销徽章（限时免费、夜间折扣）直接跟在模型名后（如 `Hy4 preview · x0.00 · 限时免费`），设置卡片会汇总当前有优惠的模型，数据以 WorkBuddy 服务端为准、每次启动 DSH 时同步。国际版促销来自服务端 `modelPromotions`（含生效时段），过期后徽章自动撤销；由于服务端把折后价直接写进模型的倍率字段，原价无法还原，此时该模型倍率显示为「价格未知 — 刷新后更新」，而不是继续显示折扣价或「免费」。
 
 ![设置卡片显示插件](assets/2.png)
 
-卡片展开后分「状态 / 上下文 / 明细」三个标签：状态页展示账号、令牌有效期、合计积分、模型列表来源与推理档位检测；上下文页列出各模型上下文窗口，国际版可在这里关闭「使用上游声明的最大上下文窗口」（默认开启，DSH 按上游最大窗口安排上下文压缩；关闭后改用上游默认窗口，偏好持久化）；明细页展示各套餐余量与模型优惠。国内版与国际版各有一张自己的卡片。
+卡片展开后分「状态 / 上下文 / 明细 / User-Agent」四个标签：状态页展示账号、令牌有效期、合计积分、模型列表来源与推理档位检测；上下文页列出各模型上下文窗口，国际版可在这里关闭「使用上游声明的最大上下文窗口」（默认开启，DSH 按上游最大窗口安排上下文压缩；关闭后改用上游默认窗口，偏好持久化）；明细页展示各套餐余量与模型优惠；User-Agent 页就是上文的请求身份编辑器。国内版与国际版各有一张自己的卡片。
 
 ![设置卡片显示账号与剩余积分](assets/3.png)
 
@@ -114,8 +132,8 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 
 - 在 macOS 的 DSH Web / Desktop / TUI 下验证通过（0.3.2 起要求 `0.1.5-rc.1`+、Node 22+；TUI 需终端界面插件 `0.10.0-beta.5` 及以上，见安装章节说明）。Windows 会依次探测 Local 与 Roaming AppData；WSL 会优先从挂载的 Windows 用户目录读取登录凭据。若 Windows 与 Linux 用户名不同且 Windows 环境变量未传入 WSL，请通过 `WORKBUDDY_AUTH_FILE`（国际版为 `WORKBUDDY_AI_AUTH_FILE`）指定实际位置。
 - **加密桌面凭据的解密程序定位**：解密程序在 macOS 与 Windows 上会自动探测；Windows 上国内版先查默认路径 `%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe`，再查卸载注册表记录，国际版没有已验证的默认路径、仅查注册表。自动探测失败时，可用 `WORKBUDDY_ELECTRON_BIN`（国内版）或 `WORKBUDDY_AI_ELECTRON_BIN`（国际版）显式指定可执行文件，设置后需完全退出并重启 DSH 才生效。Linux 无法自动发现，需显式指定。WSL 下调用 Windows 侧解密程序时，插件会自动把子进程 `WSLENV` 中的 `ELECTRON_RUN_AS_NODE` 条目规范化为单一安全旗标（含 `/w` 转发、不做路径转换，其余条目原样保留），无需手动设置。此改动已通过离线回归测试，尚未完成 WSL2 / Windows 真机验证。
-- **国际版的模型目录来自 App 界面接口**：服务端按 User-Agent 分流下发，属私有实现，上游改动可能使其失效。届时插件按「本账号上次成功目录 → 内置目录」降级，并在卡片上标明来源（实时 / 已保存 / 内置）、更新时间与失败原因，但不能保证长期兼容。国内版目录走官方 CLI 同款接口，不受此影响。
-- **国际版仍未覆盖的环境**：Windows / WSL / Linux 下国际版 App 的版本读取尚未找到可靠来源，会退回最近保存的版本或内置值。macOS 上已通过真实 shim 验证 GPT 系完整回复、工具调用与续轮。
+- **模型目录按 User-Agent 分流**：服务端按 UA 决定下发哪份模型列表，属私有实现，上游改动可能使其失效。届时插件按「本账号上次成功目录 → 内置目录」降级，并在卡片上标明来源（实时 / 已保存 / 内置）、更新时间与失败原因，但不能保证长期兼容。**分流规则已实测**（2026-10-15，同一凭据、同一端点）：UA 里同时含 `CLI/…` 与 `CodeBuddy/…` 两段时返回 CLI 名单（国际版 19 个），含其它任何可识别的 `name/version` 段时返回 App 名单（24 个），完全没有可识别段时返回 `400 check ua, get coding copilot version error`。**版本号本身不被校验**（`WorkBuddyAI/1.0.0`、`WorkBuddyAI/99.99.99`、甚至 `WorkBuddyAI/` 不带版本都返回同一份目录），产品名的大小写与是否带空格同样不影响（`workbuddy-ai/5.7.6` 与 `WorkBuddy AI/5.7.6` 都可用）。**注意 `CLI/…` 与 `CodeBuddy/…` 必须成对出现**：只有 `CodeBuddy/5.5.4` 会返回 HTTP 200 但**没有 `cli` 名单**（静默的错误答案），只有 `CLI/2.137.1` 直接 400。国内版目录走官方 CLI 同款接口，不受此影响。
+- **版本读取的覆盖范围**：Windows 与 macOS 上两个 App 的版本都可从本机读出（`cli/product.json` 的 `genieVersion`，Windows 另有卸载记录与可执行文件版本作为后备）。Linux / WSL 尚未找到可靠来源，会退回最近保存的版本或内置值。macOS 上已通过真实 shim 验证 GPT 系完整回复、工具调用与续轮。
 - **无凭据时的行为变化**：某版 App 从未登录、也没留下插件自留副本时，该版模型分组不再显示。此前国内版会显示一份内置兜底列表，但那些模型选了必然报错。
 - **企业账号积分目前仅覆盖国内版**：国际版企业账号的计费接口尚未验证，仍按个人版接口读取；待有实测结论后再扩展。企业账号分支在本机无法自测（开发机为个人账号），依据官方 App 的接口契约实现，欢迎企业账号用户反馈实测结果。
 - **设置入口随 DSH 版本而异**：0.1.5 / 0.1.6 上插件照常安装 `authFile` / `authFileAI` 等设置分区（`settings.yaml` 与 TUI `/settings` 均可读写）；0.1.7+ / 0.2.0 的设置服务不再提供该接口，插件降级为无设置项的 provider——模型、选择器、模型显隐与上下文窗口照常工作，只是「使用上游声明的最大上下文窗口」这一偏好不再可持久化。
@@ -127,7 +145,7 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 
 | DSH 内核 | 推荐插件版 | 注意事项 |
 |---|---|---|
-| `0.2.0-rc.2` | `0.7.5`（npm latest） | 当前最新线；修复输入框组件消失与 WSL helper 环境转发，勿停留在有注册表回归的 0.7.2。 |
+| `0.2.0-rc.2` | `0.7.6` | 当前最新线；UA 版本改读本机 App，并修复输入框组件消失与 WSL helper 环境转发，勿停留在有注册表回归的 0.7.2。 |
 | `0.2.0-rc.1` | `0.7.0` | 0.7.1 起不再支持 rc.1，请停留本版。 |
 | `0.1.5` – `0.1.7` | `0.6.5` | 旧内核最终版；0.7.0 起仅面向 0.2.0。 |
 | `0.1.2-rc.1` | `0.3.1` | 更早旧线，仅历史维护。 |
@@ -135,6 +153,8 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 
 历次更新（完整记录见 [releases](https://github.com/corrinehu/dsh-workbuddy-connect/releases)）：
 
+- **0.7.6**：User-Agent 默认值里的版本改为**读取本机安装的 App**（Windows / macOS 均支持，含非默认安装路径），新增 `$DSH_HOME/.workbuddy-installed-version.json` 版本缓存；默认模板取不到本机版本时**整段退回编译常量**，不再发出半截模板（实测半截模板会造成静默错误答案）。同时订正文档与注释中与实测不符的 UA 分流描述：原先称「带空格会被 400 拒绝」，实测不成立。
+- **0.7.5**：修复输入框组件消失与 WSL helper 环境转发。
 - **0.7.4**：Windows 诊断与稳定性改进：注册表子进程输出超限准确分类、跨平台测试假设修正（[#62](https://github.com/corrinehu/dsh-workbuddy-connect/issues/62)），安装说明重排。
 - **0.7.3**：修复 Windows 非默认安装路径下注册表自动发现失败（[#105](https://github.com/corrinehu/dsh-workbuddy-connect/issues/105)）。
 - **0.7.2**：pi-ai 改为插件自带依赖，并修复推理字段请求被拒（[#92](https://github.com/corrinehu/dsh-workbuddy-connect/issues/92)）；该版存在 Windows 注册表回归，请使用 0.7.4 或更新的正式版本。
@@ -142,7 +162,7 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 - **0.7.0**：适配 DSH 0.2.0 的设置服务改造，不再支持 0.1.x。
 - **0.6.5**：0.1.x 线最终版本。
 
-固定版本安装示例：`dsh plugin --profile web add dsh-workbuddy-connect@0.7.5`。
+固定版本安装示例：`dsh plugin --profile web add dsh-workbuddy-connect@0.7.6`。
 
 **不要把 profile 级的 `@earendil-works/pi-ai` 升到 1.x**：本插件与 `0.2.0-rc.2` 这一代内核都要求 `^0.87.1`（0.7.2 起由插件自带），第三方插件管理器的「可更新」提示不校验 peer 约束、不能照做（[#86](https://github.com/corrinehu/dsh-workbuddy-connect/issues/86)）；为此历史遗留的 `overrides: {'@earendil-works/pi-ai': '0.87.1'}` 在确认其他插件不依赖前也不要盲目移除。
 

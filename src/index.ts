@@ -23,17 +23,22 @@ import { atRestKeyProviderFor, WorkBuddyAtRestKeyProvider } from './desktop-cred
 import { FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog } from './catalog.ts'
 import { workbuddyCatalogPath, WorkBuddyCatalogStore } from './catalog-store.ts'
 import { WorkBuddyVisibilityStore, workbuddyVisibilityPath } from './visibility-store.ts'
+import { WorkBuddyUserAgentStore, workbuddyUaPath } from './ua-store.ts'
+import { UA_PLACEHOLDERS, UA_SLOTS, isUaSlot, planUaSlot, validateUaTemplate, type UaContext, type UaSlot } from './ua-template.ts'
 import { createWorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { WorkBuddyProbeService } from './probe-service.ts'
 import { newestFirst, WorkBuddyProbeStore, workbuddyProbePath } from './probe-store.ts'
-import { WorkBuddyUpstreamClient } from './upstream.ts'
+import { WorkBuddyUpstreamClient, uaContextOf, type InstalledAppIdentity } from './upstream.ts'
+import { fallbackChatIdentity, resolveChatIdentity } from './client-identity.ts'
+import { resolveAppVersion } from './app-version.ts'
+import { beginInstalledIdentity, forgetInstalledIdentity, installedIdentity, installedIdentityNow, readBundledCliVersion } from './app-install.ts'
 import { piAiVersionWarning } from './pi-ai-guard.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
 import { registerWorkBuddyUpdateRoute } from './update-route.ts'
 import { createProbeKey, registerWorkBuddyProbeRoute } from './probe-route.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
-import type { WorkBuddyWebCatalog, WorkBuddyWebProbeSection } from './status-paths.ts'
+import type { WorkBuddyWebCatalog, WorkBuddyWebProbeSection, WorkBuddyWebUaSection, WorkBuddyWebUaSlot } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
 import { WORKBUDDY_CONNECT_VERSION } from './version.ts'
 import { legacySettingsOf } from './legacy-settings.ts'
@@ -57,6 +62,29 @@ export {
   WorkBuddyVisibilityStore,
   workbuddyVisibilityPath,
 } from './visibility-store.ts'
+export {
+  WORKBUDDY_UA_FILENAME,
+  WorkBuddyUserAgentStore,
+  workbuddyUaPath,
+} from './ua-store.ts'
+export {
+  UA_MAX_TEMPLATE_LENGTH,
+  UA_PLACEHOLDERS,
+  UA_SHARED_FALLBACK,
+  UA_SLOTS,
+  defaultUaTemplate,
+  expandUaTemplate,
+  isUaSlot,
+  planUaSlot,
+  resolveUserAgent,
+  validateUaTemplate,
+  type UaContext,
+  type UaPlaceholder,
+  type UaRegion,
+  type UaSlot,
+  type UaSlotPlan,
+  type UaTemplateError,
+} from './ua-template.ts'
 export {
   fingerprintModel,
   WorkBuddyProbeStore,
@@ -92,6 +120,23 @@ export {
   type WorkBuddyAppVersionSource,
 } from './app-version.ts'
 export {
+  beginInstalledIdentity,
+  forgetInstalledIdentity,
+  installedIdentity,
+  installedIdentityNow,
+  installedVersionPath,
+  readBundledCliVersion,
+  readBundledProductJson,
+  readWindowsInstallRecords,
+  resolveInstalledVersion,
+  resolveInstalledVersionAsync,
+  validVersion,
+  WORKBUDDY_INSTALLED_VERSION_FILENAME,
+  type InstalledVersion,
+  type InstalledVersionSource,
+  type ResolveInstalledVersionOptions,
+} from './app-install.ts'
+export {
   CN_APP_VERSION_FILENAME,
   FALLBACK_CN_APP_VERSION,
   chatUserAgent,
@@ -118,6 +163,7 @@ export {
   classifyUpstreamError,
   modelWithCurrentPromotion,
   normalizeCredits,
+  uaContextOf,
   parseModelCatalog,
   prepareChatBody,
   prepareCnChatBody,
@@ -276,6 +322,23 @@ const AI_SECTION: z<Config> = z.object({
   useMaximumContextWindow: MAXIMUM_CONTEXT_WINDOW_FIELD,
 })
 
+/**
+ * Whether a template is allowed to reach a header.
+ *
+ * The route answers with the *reason* rather than a bare refusal, and never
+ * stores a template it refused — a UA the user believes they changed but that
+ * did not persist is diagnosed as an upstream problem, and one that did persist
+ * while being unusable is a header the plugin should never send.
+ */
+function uaTemplateProblem(template: string): string | undefined {
+  const error = validateUaTemplate(template)
+  if (error === undefined) return undefined
+  if (error === 'empty') return 'the user agent must not be empty'
+  if (error === 'too-long') return 'the user agent is too long'
+  if (error === 'control-char') return 'the user agent must not contain control characters or line breaks'
+  return `unknown placeholder; allowed: ${UA_PLACEHOLDERS.map(name => `{${name}}`).join(', ')}`
+}
+
 /** One variant's live runtime, assembled by {@link createVariantRuntime}. */
 interface VariantRuntime {
   variant: WorkBuddyVariant
@@ -299,6 +362,19 @@ interface VariantRuntime {
    * another, and switching accounts switches the whole list in one read.
    */
   visibilityStore: WorkBuddyVisibilityStore
+  /**
+   * This variant's UA overrides, one file per variant like the catalogs: the
+   * two products send different UAs, so an override saved for one must never be
+   * sent by the other.
+   */
+  uaStore: WorkBuddyUserAgentStore
+  /**
+   * The identity the UA editor previews with: the same values the wire path
+   * expands, resolved through the very same resolvers. Async because reading
+   * the installed app is a filesystem probe; the caller degrades rather than
+   * rejecting, and a preview built from a stale guess would be worse than none.
+   */
+  uaContext: () => Promise<UaContext>
   /**
    * The visibility account key currently in effect (`uid:enterpriseId`), or
    * undefined when signed out or the credential carries no uid. Read per call,
@@ -383,7 +459,13 @@ function fallbackFor(variant: WorkBuddyVariant): readonly WorkBuddyModelInfo[] {
   return variant.id === CN_VARIANT.id ? FALLBACK_WORKBUDDY_MODELS : FALLBACK_WORKBUDDY_AI_MODELS
 }
 
-/** Build one variant's stores and probe state. */
+/**
+ * Build one variant's stores and probe state.
+ *
+ * `uaOverrideOf` is a closure over this runtime's store rather than a value:
+ * the client reads it per request, so a template the card saves takes effect on
+ * the next request instead of the next restart.
+ */
 function createVariantRuntime(
   config: Config,
   variant: WorkBuddyVariant,
@@ -392,7 +474,38 @@ function createVariantRuntime(
   accountOf: (variantId: string) => string | undefined,
   keyProvider: WorkBuddyStoreOptions['keyProvider'],
 ): VariantRuntime {
-  const client = new WorkBuddyUpstreamClient()
+  const uaStore = new WorkBuddyUserAgentStore({ path: workbuddyUaPath() })
+  /**
+   * The installed app's identity, which every UA slot expands with.
+   *
+   * **Synchronous on purpose.** The resolution may need the Windows registry,
+   * which spawns a subprocess, and a User-Agent must never put that on a chat
+   * message's critical path. So the request path reads only what has already
+   * landed ({@link installedIdentityNow}) and the resolution is started at
+   * registration time; until it lands, the identity chain answers — which is
+   * exactly what this plugin sent before the installed-version work.
+   *
+   * Per variant on purpose: the two products are separate installs with
+   * separate versions, and mixing them would label one product's request with
+   * the other's release.
+   */
+  const installedApp = (): InstalledAppIdentity => {
+    const info = installedIdentityNow(variant)
+    if (info === undefined) return {}
+    const cliVersion = info.installRoot === undefined ? undefined : readBundledCliVersion(info.installRoot)
+    return {
+      appVersion: info.version,
+      ...info.productName === undefined ? {} : { productName: info.productName },
+      ...cliVersion === undefined ? {} : { cliVersion },
+    }
+  }
+  const client = new WorkBuddyUpstreamClient({
+    uaOverride: (slot, region) => uaStore.override(variant.id, slot),
+    installedIdentity: () => Promise.resolve(installedApp()),
+  })
+  // Start the install and registry read now, so it is usually finished long
+  // before the first request — without any request ever waiting for it.
+  beginInstalledIdentity(variant)
   const configured = configuredAuthFile(config, variant)
   const store = new WorkBuddyCredentialStore({
     variant,
@@ -422,6 +535,19 @@ function createVariantRuntime(
   const visibilityStore = new WorkBuddyVisibilityStore(
     workbuddyVisibilityPath(variant.visibilityFilename),
   )
+  /**
+   * The values the UA editor previews with.
+   *
+   * Built through {@link uaContextOf} — the very function `upstream.ts` expands
+   * its requests with — so a preview can never disagree with what is sent. The
+   * installed identity leads and the identity chain backs it up, exactly as on
+   * the wire.
+   */
+  const uaContext = async (): Promise<UaContext> => {
+    const region = variant.region
+    const identity = await resolveChatIdentity(region).catch(() => fallbackChatIdentity(region))
+    return uaContextOf(region, identity, installedApp())
+  }
   const probeService = new WorkBuddyProbeService({
     store: probeStore,
     catalog,
@@ -445,6 +571,8 @@ function createVariantRuntime(
     probeService,
     savedCatalogs,
     visibilityStore,
+    uaStore,
+    uaContext,
     account: () => accountOf(variant.id),
     fallback,
     catalogSource: 'fallback',
@@ -472,6 +600,45 @@ function catalogSection(runtime: VariantRuntime): WorkBuddyWebCatalog {
     ...fetch?.appVersion === undefined ? {} : { appVersion: fetch.appVersion.version },
     ...runtime.catalogError === undefined ? {} : { error: runtime.catalogError },
   }
+}
+
+/**
+ * The UA editor's whole section for one card.
+ *
+ * Every slot is rendered through {@link planUaSlot} — the same function the wire
+ * path uses — so what the card shows as a preview is what the next request
+ * actually sends, including the "this stored template is unusable, the default
+ * is being sent instead" case. That equivalence is the only reason to render a
+ * preview at all; a separately-computed one would eventually disagree.
+ */
+async function uaSection(runtime: VariantRuntime): Promise<WorkBuddyWebUaSection> {
+  const context = await runtime.uaContext()
+  const slots = UA_SLOTS.map((slot): WorkBuddyWebUaSlot => {
+    const plan = planUaSlot(slot, runtime.variant.region, runtime.uaStore.override(runtime.variant.id, slot), context)
+    return {
+      slot: plan.slot,
+      template: plan.template,
+      defaultTemplate: plan.defaultTemplate,
+      overridden: plan.overridden,
+      preview: plan.preview,
+      ...plan.error === undefined ? {} : { error: plan.error },
+      // The note is about the *context*, not the template: a machine without a
+      // readable CLI version drops the token whatever the template says, and an
+      // unexplained missing segment is what makes a correct template look broken.
+      //
+      // Only for a template the user wrote. The shipped default does not drop
+      // the token — it falls back to the compiled literal as a whole, which
+      // `defaultUnavailable` reports instead; saying both would describe two
+      // different behaviours for one slot.
+      ...plan.overridden && plan.template.includes('{cliVersion}') && context.cliVersion === undefined
+        ? { missingCliVersion: true as const }
+        : {},
+      // The preview visibly differs from the template in the field; without this
+      // the difference reads as a bug rather than as the fallback it is.
+      ...plan.defaultUnavailable === true ? { defaultUnavailable: true as const } : {},
+    }
+  })
+  return { slots, placeholders: UA_PLACEHOLDERS }
 }
 
 /**
@@ -778,6 +945,10 @@ export function apply(ctx: Context, config: Config): void {
             ? undefined
             : { account, disabled: runtime.visibilityStore.disabled(account) }
         },
+        // Always present: unlike visibility, the UA editor needs no account —
+        // a template is a property of the variant, not of who is signed in, and
+        // the user may well want to fix the UA *before* signing in.
+        userAgent: () => uaSection(runtime),
         ...runtime.variant.id === CN_VARIANT.id ? {} : {
           // Presence of this field in the document is the card's capability
           // signal, so the getter answers `undefined` — not merely `false` —
@@ -799,6 +970,13 @@ export function apply(ctx: Context, config: Config): void {
         clear: () => { runtime.probeStore.clear(); runtime.invalidate() },
         refresh: async () => {
           if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
+          // Re-read the installed app's identity, and *wait* for it here. This
+          // is the one place the cost belongs: the user pressed Refresh because
+          // something looks wrong, and after an app update this is the only
+          // action that would notice. Every other path reads the cached value
+          // rather than paying a registry read mid-request.
+          forgetInstalledIdentity(runtime.variant.id)
+          await installedIdentity(runtime.variant)
           // Re-read the credential first: the user pressed this because the list
           // looks wrong, and a sign-in that happened since the last sweep is the
           // common cause. Re-registering is unnecessary — visibility is what
@@ -854,6 +1032,30 @@ export function apply(ctx: Context, config: Config): void {
             runtime.visibilityStore.setVisible(account, modelId, visible)
           } catch (error: unknown) {
             // A toggle that did not persist must not be reported as saved.
+            return { state: 'failed', reason: error instanceof Error ? error.message.slice(0, 300) : String(error) }
+          }
+          runtime.invalidate()
+          return { state: 'updated' }
+        },
+        setUserAgent: async (slot, template) => {
+          // The slot must be one this build knows: an unrecognised name has no
+          // default to fall back to and no request family to belong to, so
+          // storing it would only produce an entry nothing ever reads.
+          if (!isUaSlot(slot)) {
+            return { state: 'failed', reason: `unknown user-agent slot: ${slot}` }
+          }
+          if (template !== null) {
+            const problem = uaTemplateProblem(template)
+            // A template the wire path would refuse must not be reported as
+            // saved: the user would then be diagnosing the upstream while the
+            // plugin silently kept sending something else.
+            if (problem !== undefined) return { state: 'failed', reason: problem }
+          }
+          try {
+            runtime.uaStore.setOverride(runtime.variant.id, slot, template ?? undefined)
+          } catch (error: unknown) {
+            // Same rule as the visibility toggle: a write that did not persist
+            // is a failure, not a save.
             return { state: 'failed', reason: error instanceof Error ? error.message.slice(0, 300) : String(error) }
           }
           runtime.invalidate()
