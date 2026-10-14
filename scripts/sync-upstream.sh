@@ -93,6 +93,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
+PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+
 step "Merging upstream/main"
 if git merge --no-edit upstream/main; then
   echo "merged cleanly."
@@ -111,16 +113,30 @@ fi
 
 # lib/ is committed, so a merge that only brings source changes would ship a
 # stale bundle — and the plugin's runtime entry points are all in lib/.
+#
+# The rebuild is verified *before* anything else is committed: a failed build
+# can delete most of lib/, and amending that into the merge commit is the exact
+# failure that made a hand-written version of this step necessary. On failure
+# the script rewinds the merge commit to the pre-merge state, so a broken build
+# never lands.
 step "Rebuilding lib/"
 if [ -d node_modules ]; then
   if command -v pnpm >/dev/null 2>&1; then
-    pnpm run build
+    BUILD_OK=0; pnpm run build || BUILD_OK=$?
   else
-    corepack pnpm@10 run build
+    BUILD_OK=0; corepack pnpm@10 run build || BUILD_OK=$?
   fi
 else
   echo "node_modules missing; run your package manager's install first, then" >&2
   echo "'pnpm run build' and amend the merge commit." >&2
+  exit 1
+fi
+
+if [ "$BUILD_OK" -ne 0 ]; then
+  echo "" >&2
+  echo "BUILD FAILED (exit $BUILD_OK). Rewinding the merge commit to $PRE_MERGE_HEAD" >&2
+  echo "so no broken build is committed. Fix the build, then re-run." >&2
+  git reset --hard "$PRE_MERGE_HEAD"
   exit 1
 fi
 
