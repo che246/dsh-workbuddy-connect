@@ -4,6 +4,8 @@
 
 将已登录的 WorkBuddy / WorkBuddy AI 桌面应用中可用的模型接入 DeepSeek Harness；两版分别显示各自的模型分组，并沿用各自的账号登录与积分。
 
+> **这是 [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) 的 fork**，在上游 0.7.5 之上追加了「User-Agent 默认值读取本机安装版本」的改动（见「User-Agent 自定义」与「版本兼容与历史版本」）。上游是权威版本，issue 与 release 都在上游；本 fork 没有自己的 issue 追踪与 release 发布，故下文所有 issue / release 链接均指向上游。
+
 ## 安装
 
 **前置**：本机已安装并登录 WorkBuddy（国内版）或 WorkBuddy AI 桌面 App。插件直接复用 App 的登录状态，账号切换自动跟随，两版互不影响。
@@ -11,7 +13,7 @@
 **推荐：把安装交给本机已有的 Agent**——任何具备终端与文件操作能力的助手（DSH Agent、Codex、Claude Code、Cursor 等）都可以，把下面这段话原样发给它：
 
 ```text
-请帮我安装并验证 DSH（DeepSeek Harness）插件 dsh-workbuddy-connect（项目地址：https://github.com/corrinehu/dsh-workbuddy-connect）：
+请帮我安装并验证 DSH（DeepSeek Harness）插件 dsh-workbuddy-connect（上游项目：https://github.com/corrinehu/dsh-workbuddy-connect；本仓库为 fork，含 UA 改动：https://github.com/che246/dsh-workbuddy-connect）：
 先阅读项目 README，确认我实际使用的界面（Web / Desktop / TUI）与 DSH 内核版本，桌面版以 App 内置核心为准，不要用独立 CLI 的版本代替；
 再按版本对应关系从 npm 正式包安装（0.2.0-rc.2→0.7.5、rc.1→0.7.0、0.1.5–0.1.7→0.6.5），优先走本机受支持的非插件市场渠道；部分 Desktop 发行版（尤其官方 Electron 版）的 profile 由 App 管理，各发行版规则未必相同，先确认我所用的发行版，再探查其合规的安装方式，但不得绕过其校验；
 任何本地文件或配置改动，先征得我同意并做好备份；
@@ -23,7 +25,7 @@
 
 | DSH 内核 | 推荐插件版 |
 |---|---|
-| 0.2.0-rc.2 | 0.7.5（npm latest） |
+| 0.2.0-rc.2 | 0.7.5（npm latest）；本仓库另有 0.7.6，含 UA 改动，需从源码安装 |
 | 0.2.0-rc.1 | 0.7.0 |
 | 0.1.5 – 0.1.7 | 0.6.5 |
 
@@ -31,9 +33,12 @@
 <summary>手动安装（命令行，仅 Web / TUI）</summary>
 
 ```sh
-# Web（按实际内核固定版本，示例为 0.2.0-rc.2 → 0.7.5；也可用 github:corrinehu/dsh-workbuddy-connect 从源码安装）
+# Web（按实际内核固定版本，示例为 0.2.0-rc.2 → 0.7.5；也可用 github:che246/dsh-workbuddy-connect 从源码安装）
 dsh plugin --profile web add dsh-workbuddy-connect@0.7.5
 dsh web
+
+# 本仓库的 0.7.6（尚未发布到 npm，只能从源码装）
+dsh plugin --profile web add github:che246/dsh-workbuddy-connect
 
 # TUI（示例为 0.1.x 内核；该 profile 需用 pnpm 11 安装，如 npx pnpm@11）
 dsh plugin --profile dsh-tui add dsh-workbuddy-connect@0.6.5
@@ -46,7 +51,7 @@ dsh --profile dsh-tui
 
 > **Desktop**：部分 Desktop 发行版（尤其官方 Electron 版）的 `desktop` profile 由 App 管理，官方版会直接拒绝独立 CLI 的 `--profile desktop`；其他发行版规则未必相同，请先检查你所用的发行版，不要盲用独立 CLI 的 `--profile desktop`。可以让 Agent 探查是否有合规的非市场安装路径，但不保证可行；切勿盲改 App 管理的目录或绕过其校验。
 
-**验证**：重启对应界面后，模型选择器出现「WorkBuddy / WorkBuddy AI」分组（只装一版就只验对应一组），并从分组里选一个模型完成一次简短对话、能正常回复，才算安装成功。
+**验证**：重启对应界面后，模型选择器出现「WorkBuddy / WorkBuddy AI」分组（只装一版就只验对应一组），并从分组里选一个模型完成一次简短对话、能正常回复，才算安装成功。从源码安装时无需自行构建：`lib/` 构建产物已随仓库提交。
 
 ## 功能
 
@@ -145,7 +150,8 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 
 | DSH 内核 | 推荐插件版 | 注意事项 |
 |---|---|---|
-| `0.2.0-rc.2` | `0.7.6` | 当前最新线；UA 版本改读本机 App，并修复输入框组件消失与 WSL helper 环境转发，勿停留在有注册表回归的 0.7.2。 |
+| `0.2.0-rc.2` | `0.7.5`（npm latest） | 当前 npm 最新线；修复输入框组件消失与 WSL helper 环境转发，勿停留在有注册表回归的 0.7.2。 |
+| `0.2.0-rc.2` | `0.7.6`（仅源码） | 本仓库的 UA 改动：默认值里的版本改读本机 App。**尚未发布到 npm**，需 `github:che246/dsh-workbuddy-connect` 安装。 |
 | `0.2.0-rc.1` | `0.7.0` | 0.7.1 起不再支持 rc.1，请停留本版。 |
 | `0.1.5` – `0.1.7` | `0.6.5` | 旧内核最终版；0.7.0 起仅面向 0.2.0。 |
 | `0.1.2-rc.1` | `0.3.1` | 更早旧线，仅历史维护。 |
@@ -153,7 +159,7 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 
 历次更新（完整记录见 [releases](https://github.com/corrinehu/dsh-workbuddy-connect/releases)）：
 
-- **0.7.6**：User-Agent 默认值里的版本改为**读取本机安装的 App**（Windows / macOS 均支持，含非默认安装路径），新增 `$DSH_HOME/.workbuddy-installed-version.json` 版本缓存；默认模板取不到本机版本时**整段退回编译常量**，不再发出半截模板（实测半截模板会造成静默错误答案）。同时订正文档与注释中与实测不符的 UA 分流描述：原先称「带空格会被 400 拒绝」，实测不成立。
+- **0.7.6**（本仓库，尚未发布到 npm）：User-Agent 默认值里的版本改为**读取本机安装的 App**（Windows / macOS 均支持，含非默认安装路径），新增 `$DSH_HOME/.workbuddy-installed-version.json` 版本缓存；默认模板取不到本机版本时**整段退回编译常量**，不再发出半截模板（实测半截模板会造成静默错误答案）。同时订正文档与注释中与实测不符的 UA 分流描述：原先称「带空格会被 400 拒绝」，实测不成立。用 `dsh plugin --profile web add github:che246/dsh-workbuddy-connect` 安装。
 - **0.7.5**：修复输入框组件消失与 WSL helper 环境转发。
 - **0.7.4**：Windows 诊断与稳定性改进：注册表子进程输出超限准确分类、跨平台测试假设修正（[#62](https://github.com/corrinehu/dsh-workbuddy-connect/issues/62)），安装说明重排。
 - **0.7.3**：修复 Windows 非默认安装路径下注册表自动发现失败（[#105](https://github.com/corrinehu/dsh-workbuddy-connect/issues/105)）。
@@ -162,7 +168,7 @@ dsh plugin --profile web exec dsh-workbuddy-connect doctor --provider workbuddy-
 - **0.7.0**：适配 DSH 0.2.0 的设置服务改造，不再支持 0.1.x。
 - **0.6.5**：0.1.x 线最终版本。
 
-固定版本安装示例：`dsh plugin --profile web add dsh-workbuddy-connect@0.7.6`。
+固定版本安装示例：`dsh plugin --profile web add dsh-workbuddy-connect@0.7.5`（本仓库的 0.7.6 尚未发布到 npm，需用 `github:che246/dsh-workbuddy-connect` 安装）。
 
 **不要把 profile 级的 `@earendil-works/pi-ai` 升到 1.x**：本插件与 `0.2.0-rc.2` 这一代内核都要求 `^0.87.1`（0.7.2 起由插件自带），第三方插件管理器的「可更新」提示不校验 peer 约束、不能照做（[#86](https://github.com/corrinehu/dsh-workbuddy-connect/issues/86)）；为此历史遗留的 `overrides: {'@earendil-works/pi-ai': '0.87.1'}` 在确认其他插件不依赖前也不要盲目移除。
 
